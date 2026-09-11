@@ -1,6 +1,6 @@
 #!/bin/bash
 #================================================================================================
-# rebuild-panther-x2.sh — Panther-X2 专属镜像组装(完全不依赖 Armbian)
+# rebuild-panther-x2 — Panther-X2 专属镜像组装(完全不依赖 Armbian)
 #
 # 输入三件套:
 #   1. 我们自建内核的 .deb          (来自 163jm/kernel 的 Release, 含 vmlinuz/modules)
@@ -12,7 +12,7 @@
 # 引导: u-boot distro_boot → /extlinux/extlinux.conf, 内核全内建, 无 initramfs
 #
 # 全程文件级操作, 不 chroot (x86 runner 处理 arm64 rootfs 无需 qemu)
-# 用法: sudo bash rebuild-panther-x2.sh
+# 用法: sudo bash rebuild-panther-x2
 #================================================================================================
 set -euo pipefail
 
@@ -113,7 +113,7 @@ rm -f "$RS/etc/resolv.conf"; echo "nameserver 223.5.5.5" > "$RS/etc/resolv.conf"
 OVERLAY="${SCRIPT_DIR}/rootfs-overlay"
 if [[ -d "$OVERLAY" ]]; then
     cp -a "$OVERLAY/." "$RS/"
-    chmod 755 "$RS/usr/sbin"/panther-*.sh "$RS/usr/sbin"/install-to-emmc
+    chmod 755 "$RS/usr/sbin"/panther-* "$RS/usr/sbin"/install-to-emmc
     chmod 644 "$RS/etc/balance_irq" "$RS/etc/modprobe.d/brcmfmac.conf" \
               "$RS/etc/default/panther-cpufreq" "$RS/etc/default/panther-swapfile"
     for u in panther-resize.service panther-irq.service panther-cpufreq.service panther-swapfile.service; do

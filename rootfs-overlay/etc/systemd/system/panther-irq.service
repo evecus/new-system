@@ -3,7 +3,7 @@ Description=Panther IRQ affinity & RPS balancing
 After=multi-user.target
 [Service]
 Type=oneshot
-ExecStart=/usr/sbin/balethirq.sh
+ExecStart=/usr/sbin/balethirq
 RemainAfterExit=yes
 [Install]
 WantedBy=multi-user.target

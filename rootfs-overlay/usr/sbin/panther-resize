@@ -1,0 +1,89 @@
+#!/bin/sh
+# 首次启动自动扩容 — 参考 Armbian/ophub resize 机制(main/debian-resize-filesystem)
+# 方法: fdisk 删除并重建 root 分区(起始扇区不变, 末扇区按容量规则), 再 resize2fs
+# 语义: 成功(或无需扩容)后立即 stop 并 disable 本服务; 失败保持启用, 下次启动重试
+MARKER=/var/lib/panther/resize-done
+REBOOT_FLAG=/var/run/resize2fs-reboot
+SERVICE=panther-resize.service
+mkdir -p /var/lib/panther
+rm -f "$REBOOT_FLAG" 2>/dev/null
+[ -f "$MARKER" ] && exit 0
+
+finish_ok() {
+    systemctl disable --now "$SERVICE" 2>/dev/null
+    exit 0
+}
+
+# --- 定位 root 设备 ---
+ROOT_DEV=$(findmnt -no SOURCE /) 2>/dev/null || ROOT_DEV=""
+[ -n "$ROOT_DEV" ] || exit 0
+case "$ROOT_DEV" in
+    *mmcblk*p[0-9]|*nvme*p[0-9]|*[sv]d[a-z][0-9]) ;;
+    *) echo "root 分区格式无法识别: $ROOT_DEV"; exit 0 ;;
+esac
+DISK=${ROOT_DEV%p[0-9]*}
+PART=${ROOT_DEV##*/}                       # mmcblk1p2
+PARTNUM=${PART##*p}                        # 2
+PARTSTART=$(cat /sys/class/block/$PART/start)
+CUR_SECT=$(cat /sys/class/block/$PART/size)
+DISK_SECT=$(cat /sys/class/block/${DISK##*/}/size)
+SECTSIZE=$(cat /sys/class/block/${DISK##*/}/queue/hw_sector_size 2>/dev/null || echo 512)
+[ "$SECTSIZE" -ge 512 ] 2>/dev/null || SECTSIZE=512
+
+# --- 目标末扇区: 按容量留余量(≤4GiB 留 5%, ≤8GiB 留 2%, 其余留 1%) ---
+if [ $(( SECTSIZE * DISK_SECT )) -lt $(( 4 * 1024 * 1024 * 1024 )) ]; then
+    LAST=$(( DISK_SECT * 95 / 100 )); echo "≤4GiB 介质: 预留 5%"
+elif [ $(( SECTSIZE * DISK_SECT )) -lt $(( 8 * 1024 * 1024 * 1024 )) ]; then
+    LAST=$(( DISK_SECT * 98 / 100 )); echo "≤8GiB 介质: 预留 2%"
+else
+    LAST=$(( DISK_SECT * 99 / 100 )); echo "预留 1%"
+fi
+# 16MiB 对齐(SD/eMMC 擦除块)
+ALIGN=$(( 16 * 1024 * 1024 / SECTSIZE ))
+LAST=$(( LAST - (LAST % ALIGN) - 1 ))
+CUR_END=$(( PARTSTART + CUR_SECT - 1 ))
+if [ "$LAST" -lt "$CUR_END" ]; then
+    echo "目标小于当前大小, 只扩不缩, 跳过"
+    touch "$MARKER"
+    finish_ok
+elif [ "$LAST" -eq "$CUR_END" ]; then
+    echo "已到目标大小, 跳过"
+    touch "$MARKER"
+    finish_ok
+fi
+echo "扩容 $ROOT_DEV: ${CUR_SECT} -> $(( LAST - PARTSTART + 1 )) 扇区"
+
+# --- fdisk 删除并重建 (起始扇区不变) ---
+{
+    echo d
+    [ "$PARTNUM" -ne 1 ] && echo "$PARTNUM"
+    echo n; echo p; echo "$PARTNUM"; echo "$PARTSTART"; echo "$LAST"
+    echo w
+} | fdisk "$DISK" > /dev/null 2>&1 || { echo "fdisk 扩容失败, 保持启用待重试"; exit 1; }
+
+partprobe "$DISK" 2>/dev/null || blockdev --rereadpt "$DISK" 2>/dev/null || true
+sleep 1
+NEW_CUR=$(cat /sys/class/block/$PART/size 2>/dev/null || echo "$CUR_SECT")
+if [ "$NEW_CUR" -le "$CUR_SECT" ]; then
+    echo "分区表未生效, 需要重启后重试"
+    touch "$REBOOT_FLAG"
+    exit 0
+fi
+
+# --- 文件系统扩容 ---
+if resize2fs "$ROOT_DEV"; then
+    FS_SIZE=$(findmnt -n -b -o SIZE / 2>/dev/null || echo 0)
+    DEV_SIZE=$(lsblk -n -b -o SIZE "$ROOT_DEV" 2>/dev/null || echo 0)
+    if [ "$FS_SIZE" -ge "$DEV_SIZE" ] 2>/dev/null; then
+        touch "$MARKER"
+        echo "扩容完成, 停止并禁用本服务"
+        finish_ok
+    else
+        echo "文件系统未完全扩展, 需要重启后重试"
+        touch "$REBOOT_FLAG"
+    fi
+else
+    echo "resize2fs 失败, 保持启用待重试"
+    touch "$REBOOT_FLAG"
+fi
+exit 0

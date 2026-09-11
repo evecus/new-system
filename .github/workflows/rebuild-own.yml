@@ -49,7 +49,7 @@ jobs:
             ROOT_PASS="${{ inputs.root_password }}" \
             SSH_PUBKEY="${{ inputs.ssh_pubkey }}" \
             OUT="${GITHUB_WORKSPACE}/out" \
-            bash rebuild-panther-x2.sh
+            bash rebuild-panther-x2
 
       - name: Prepare release files
         run: |

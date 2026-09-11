@@ -3,8 +3,11 @@ Description=Panther root filesystem auto-resize (first boot)
 After=local-fs.target
 Before=ssh.service
 ConditionPathExists=!/var/lib/panther/resize-done
+
 [Service]
 Type=oneshot
-ExecStart=/usr/sbin/panther-resize.sh
+ExecStart=/usr/sbin/panther-resize
+TimeoutStartSec=6min
+
 [Install]
 WantedBy=multi-user.target
