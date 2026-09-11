@@ -149,10 +149,10 @@ jobs:
           rm -f "${DEB}/lib/modules/${KVER}/build" "${DEB}/lib/modules/${KVER}/source"
 
           cat > "${DEB}/DEBIAN/control" << EOF
-          Package: linux-image-${KVER}
+          Package: linux-image-panther-x2
           Version: ${KVER}
           Architecture: arm64
-          Maintainer: 163jm <163jm@users.noreply.github.com>
+          Maintainer: evecus <evecus@users.noreply.github.com>
           Depends:
           Provides: linux-image
           Section: kernel
@@ -179,18 +179,10 @@ jobs:
           echo "PKG_TAR=${PKG}.tar.gz"  >> $GITHUB_ENV
           echo "PKG_DEB=${DEB}.deb"     >> $GITHUB_ENV
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: kernel-package
-          path: |
-            ${{ env.PKG_TAR }}
-            ${{ env.PKG_DEB }}
-
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             ${{ env.PKG_TAR }}
             ${{ env.PKG_DEB }}
-          tag_name: kernel-panther-x2
+          tag_name: kernel
