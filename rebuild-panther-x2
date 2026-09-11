@@ -113,7 +113,12 @@ rm -f "$RS/etc/resolv.conf"; echo "nameserver 223.5.5.5" > "$RS/etc/resolv.conf"
 OVERLAY="${SCRIPT_DIR}/rootfs-overlay"
 if [[ -d "$OVERLAY" ]]; then
     cp -a "$OVERLAY/." "$RS/"
-    chmod 755 "$RS/usr/sbin"/panther-* "$RS/usr/sbin"/install-to-emmc
+    # 显式逐一 chmod(不用通配: cp -a 自 Windows 文件系统时执行位不可靠, 且 glob 曾漏掉 balethirq)
+    chmod 755 "$RS/usr/sbin/panther-resize" \
+              "$RS/usr/sbin/balethirq" \
+              "$RS/usr/sbin/panther-cpufreq" \
+              "$RS/usr/sbin/panther-swapfile" \
+              "$RS/usr/sbin/install-to-emmc"
     chmod 644 "$RS/etc/balance_irq" "$RS/etc/modprobe.d/brcmfmac.conf" \
               "$RS/etc/default/panther-cpufreq" "$RS/etc/default/panther-swapfile"
     for u in panther-resize.service panther-irq.service panther-cpufreq.service panther-swapfile.service; do
