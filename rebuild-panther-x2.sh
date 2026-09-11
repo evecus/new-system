@@ -201,6 +201,10 @@ losetup -d "$LOOP"; LOOP=""
 rm -f "$IMG.gz"
 xz -9 -T0 -f "$IMG"
 cp "$IMG.xz" "$OUT/" 2>/dev/null || mv "$IMG.xz" "$OUT/"
+# 产物交还给调用用户(sudo 场景下避免 root 属主导致后续 mv 失败)
+if [[ -n "${SUDO_USER:-}" ]]; then
+    chown -R "${SUDO_USER}" "$OUT" 2>/dev/null || true
+fi
 echo ""
 echo "完成: ${OUT}/panther-x2-${KVER}.img.xz"
 echo "烧写: xzcat panther-x2-${KVER}.img.xz | dd of=/dev/sdX bs=4M conv=fsync  (或 balenaEtcher)"

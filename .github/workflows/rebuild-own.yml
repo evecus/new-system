@@ -53,8 +53,10 @@ jobs:
 
       - name: Prepare release files
         run: |
-          mkdir -p release
-          mv out/*.img.xz release/
+          # 脚本以 sudo 运行, 产物属 root, 这里用 sudo 归位并交还给 runner 用户
+          sudo mkdir -p release
+          sudo mv out/*.img.xz release/
+          sudo chown -R $(id -u):$(id -g) release
           echo "IMG=$(ls release/*.img.xz)" >> $GITHUB_ENV
 
       - name: Upload artifact
