@@ -1,0 +1,543 @@
+name: RootFS Archlinux
+
+on:
+  workflow_dispatch:
+    inputs:
+      arch_release:
+        description: "Arch 版本标识（ALARM 目前无版本号，仅作 tag）"
+        required: false
+        default: "aarch64"
+        type: choice
+        options:
+          - aarch64
+
+      root_password:
+        description: "root 密码"
+        required: false
+        default: "1234"
+
+      hostname:
+        description: "主机名"
+        required: false
+        default: "arch"
+
+      timezone:
+        description: "时区"
+        required: false
+        default: "Asia/Shanghai"
+        type: choice
+        options:
+          - Asia/Shanghai
+          - Asia/Tokyo
+          - America/New_York
+          - Europe/London
+          - UTC
+
+
+env:
+  TZ: UTC
+  ROOTFS_DIR: /builder/arch-rootfs
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: write
+    if: ${{ github.event.repository.owner.id == github.event.sender.id }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── 1. 初始化环境 ──────────────────────────────────────────────────
+      - name: Initialize environment
+        id: init
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          docker rmi -f $(docker images -q) 2>/dev/null || true
+          [[ -n "${AGENT_TOOLSDIRECTORY}" ]] && sudo rm -rf "${AGENT_TOOLSDIRECTORY}"
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android 2>/dev/null
+          sudo swapoff -a && sudo rm -f /swapfile /mnt/swapfile
+
+          sudo -E apt-get -y update
+          sudo -E apt-get -y purge \
+            azure-cli ghc* zulu* llvm* firefox google* dotnet* \
+            powershell openjdk* mongodb* moby* 2>/dev/null || true
+          # bsdtar 来自 libarchive-tools（解压 ALARM tarball 必需，保留 capability xattr）
+          sudo -E apt-get -y install \
+            parted e2fsprogs dosfstools btrfs-progs \
+            u-boot-tools uuid-runtime openssl pigz \
+            git curl wget xz-utils lz4 zstd pv jq rsync \
+            libarchive-tools
+          sudo -E apt-get -y autoremove --purge
+          sudo -E apt-get clean
+          sudo -E timedatectl set-timezone "${TZ}"
+
+          echo "ARCH_RELEASE=${{ inputs.arch_release || 'aarch64' }}" >> "${GITHUB_ENV}"
+          echo "ROOT_PASSWORD=${{ inputs.root_password   || '1234' }}"  >> "${GITHUB_ENV}"
+          echo "HOSTNAME_VAL=${{ inputs.hostname         || 'arch' }}"   >> "${GITHUB_ENV}"
+          echo "TZ_VAL=${{ inputs.timezone               || 'Asia/Shanghai' }}" >> "${GITHUB_ENV}"
+          echo "EXTRA_PKGS=${{ inputs.extra_packages     || '' }}"        >> "${GITHUB_ENV}"
+          echo "status=success" >> "${GITHUB_OUTPUT}"
+
+      # ── 2. 合并磁盘空间 ───────────────────────────────────────────────
+      - name: Create build disk
+        if: ${{ steps.init.outputs.status == 'success' && !cancelled() }}
+        run: |
+          mnt_size=$(expr $(df -h /mnt | tail -1 | awk '{print $4}' | sed 's/[[:alpha:]]//g' | sed 's/\..*//') - 1)
+          root_size=$(expr $(df -h / | tail -1 | awk '{print $4}' | sed 's/[[:alpha:]]//g' | sed 's/\..*//') - 4)
+          sudo truncate -s "${mnt_size}G"  /mnt/mnt.img
+          sudo truncate -s "${root_size}G" /root.img
+          sudo losetup /dev/loop6 /mnt/mnt.img
+          sudo losetup /dev/loop7 /root.img
+          sudo pvcreate /dev/loop6 /dev/loop7
+          sudo vgcreate github /dev/loop6 /dev/loop7
+          sudo lvcreate -n runner -l 100%FREE github
+          sudo mkfs.xfs -f -i sparse=0 /dev/github/runner
+          sudo mkdir -p /builder
+          sudo mount /dev/github/runner /builder
+          sudo chown -R runner:runner /builder
+          echo "可用空间: $(df -h /builder | tail -1 | awk '{print $4}')"
+
+      # ── 3. 构建 Arch rootfs ───────────────────────────────────────────
+      # 下载 ALARM 官方 aarch64 rootfs tarball，chroot 进去装包 + 精简
+      # ubuntu-24.04-arm 是 arm64 host + ALARM aarch64 rootfs，原生无需 binfmt
+      - name: Build Arch rootfs
+        id: build_rootfs
+        if: ${{ steps.init.outputs.status == 'success' && !cancelled() }}
+        run: |
+          set -euo pipefail
+
+          sudo mkdir -p "${ROOTFS_DIR}"
+
+          # ── chroot helper ──────────────────────────────────────────────
+          # 不用 arch-chroot：它内部 `mount --bind $rootfs $rootfs + --make-private`，
+          # 会让 pacman 在 chroot 内找不到 cachedir 挂载点，报：
+          #   "could not determine cachedir mount point /var/cache/pacman/pkg/..."
+          #   "failed to commit transaction (not enough free disk space)"
+          # 改成手动 mount proc/sys/dev/devpts/run，不 bind rootfs 到自身。
+          mount_chroot() {
+              sudo mount -t proc     proc     "${ROOTFS_DIR}/proc"
+              sudo mount -t sysfs    sysfs    "${ROOTFS_DIR}/sys"
+              sudo mount --bind      /dev     "${ROOTFS_DIR}/dev"
+              sudo mount --bind      /dev/pts "${ROOTFS_DIR}/dev/pts"
+              sudo mount -t tmpfs    tmpfs    "${ROOTFS_DIR}/run"
+          }
+          umount_chroot() {
+              sudo umount -R "${ROOTFS_DIR}/run"      2>/dev/null || true
+              sudo umount -R "${ROOTFS_DIR}/dev/pts"  2>/dev/null || true
+              sudo umount -R "${ROOTFS_DIR}/dev"      2>/dev/null || true
+              sudo umount -R "${ROOTFS_DIR}/sys"      2>/dev/null || true
+              sudo umount -R "${ROOTFS_DIR}/proc"     2>/dev/null || true
+          }
+          trap umount_chroot EXIT
+
+          # ── 下载 ALARM 官方 aarch64 rootfs tarball ───────────────────
+          ALARM_MIRRORS=(
+            "https://fl.us.mirror.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz"
+            "https://mirror.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz"
+            "http://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz"
+            "https://mirrors.tuna.tsinghua.edu.cn/archlinuxarm/os/ArchLinuxARM-aarch64-latest.tar.gz"
+          )
+
+          downloaded=0
+          for url in "${ALARM_MIRRORS[@]}"; do
+            echo "▶ 尝试下载: ${url}"
+            if wget -q --show-progress --tries=3 --timeout=30 -c -O /tmp/alarm-rootfs.tar.gz "${url}"; then
+              downloaded=1
+              echo "▶ 下载成功: ${url}"
+              break
+            fi
+            echo "::warning::下载失败: ${url}，尝试下一个镜像"
+          done
+          [[ "${downloaded}" -eq "1" ]] || { echo "::error::所有 ALARM 镜像均下载失败"; exit 1; }
+          echo "▶ 大小: $(du -sh /tmp/alarm-rootfs.tar.gz | awk '{print $1}')"
+
+          # ── 解压：必须用 bsdtar（来自 libarchive-tools）─────────────
+          # GNU tar 不认识 LIBARCHIVE.xattr.security.capability，会丢 capability
+          echo "▶ 确保 bsdtar 可用..."
+          command -v bsdtar || { echo "::error::bsdtar 安装失败"; exit 1; }
+
+          echo "▶ 解压到 ${ROOTFS_DIR} (bsdtar -xpf 保留 capability xattr)..."
+          sudo bsdtar -xpf /tmp/alarm-rootfs.tar.gz -C "${ROOTFS_DIR}"
+          rm -f /tmp/alarm-rootfs.tar.gz
+          echo "▶ 解压完成: $(sudo du -sh ${ROOTFS_DIR} | awk '{print $1}')"
+
+          # ── 配置 rootfs 的 resolv.conf，确保 chroot 内能解析 DNS ──
+          echo "▶ 覆盖 rootfs /etc/resolv.conf → 公共 DNS..."
+          sudo tee "${ROOTFS_DIR}/etc/resolv.conf" > /dev/null << 'RESOLV_EOF'
+          nameserver 8.8.8.8
+          nameserver 8.8.4.4
+          nameserver 1.1.1.1
+          nameserver 2606:4700:4700::1111
+          RESOLV_EOF
+          sudo sed -i 's/^[[:space:]]*//' "${ROOTFS_DIR}/etc/resolv.conf"
+
+          # ── 覆盖 pacman.conf，每个仓库配多个 Server（pacman 自动 failover）──
+          echo "▶ 覆盖 /etc/pacman.conf → 多国外镜像..."
+          sudo tee "${ROOTFS_DIR}/etc/pacman.conf" > /dev/null << 'PACMAN_EOF'
+          [options]
+          Architecture = aarch64
+          SigLevel = Required DatabaseOptional
+          LocalFileSigLevel = Optional
+          HoldPkg = pacman glibc
+
+          [core]
+          Server = https://fl.us.mirror.archlinuxarm.org/$arch/$repo
+          Server = https://mirror.archlinuxarm.org/$arch/$repo
+          Server = https://de.mirror.archlinuxarm.org/$arch/$repo
+          Server = https://fr.mirror.archlinuxarm.org/$arch/$repo
+          Server = https://mirrors.tuna.tsinghua.edu.cn/archlinuxarm/$arch/$repo
+
+          [extra]
+          Server = https://fl.us.mirror.archlinuxarm.org/$arch/$repo
+          Server = https://mirror.archlinuxarm.org/$arch/$repo
+          Server = https://de.mirror.archlinuxarm.org/$arch/$repo
+          Server = https://fr.mirror.archlinuxarm.org/$arch/$repo
+          Server = https://mirrors.tuna.tsinghua.edu.cn/archlinuxarm/$arch/$repo
+
+          [alarm]
+          Server = https://fl.us.mirror.archlinuxarm.org/$arch/$repo
+          Server = https://mirror.archlinuxarm.org/$arch/$repo
+          Server = https://de.mirror.archlinuxarm.org/$arch/$repo
+          Server = https://fr.mirror.archlinuxarm.org/$arch/$repo
+          Server = https://mirrors.tuna.tsinghua.edu.cn/archlinuxarm/$arch/$repo
+
+          [aur]
+          Server = https://fl.us.mirror.archlinuxarm.org/$arch/$repo
+          Server = https://mirror.archlinuxarm.org/$arch/$repo
+          Server = https://de.mirror.archlinuxarm.org/$arch/$repo
+          Server = https://fr.mirror.archlinuxarm.org/$arch/$repo
+          Server = https://mirrors.tuna.tsinghua.edu.cn/archlinuxarm/$arch/$repo
+          PACMAN_EOF
+          sudo sed -i 's/^[[:space:]]*//' "${ROOTFS_DIR}/etc/pacman.conf"
+
+          # ── 初始化 keyring ───────────────────────────────────────────
+          echo "▶ mount chroot 挂载点..."
+          mount_chroot
+
+          echo "▶ 精简前 rootfs: $(sudo du -sh ${ROOTFS_DIR} | awk '{print $1}')"
+
+          echo "▶ 初始化 pacman keyring..."
+          sudo chroot "${ROOTFS_DIR}" /bin/bash -c "
+            set -e
+            pacman-key --init
+            pacman-key --populate archlinuxarm
+            pacman -Sy --noconfirm
+          "
+
+          echo "▶ 卸载 ALARM 预装、但用不到的包..."
+          sudo chroot "${ROOTFS_DIR}" /bin/bash -c "
+            set -e
+
+            verify_removed() {
+              local failed=0
+              for p in \"\$@\"; do
+                if pacman -Qi \"\${p}\" >/dev/null 2>&1; then
+                  echo \"  ⚠ 卸载未生效: \${p}（可能被其他包依赖，见下方 pacman 输出）\"
+                  failed=1
+                fi
+              done
+              return \${failed}
+            }
+
+            echo '  → 卸载 firmware 包...'
+            pacman -Rns --noconfirm \
+              linux-firmware \
+              linux-firmware-whence \
+              linux-firmware-intel \
+              linux-firmware-nvidia \
+              linux-firmware-atheros \
+              linux-firmware-amdgpu \
+              linux-firmware-other \
+              linux-firmware-mediatek \
+              linux-firmware-realtek \
+              linux-firmware-broadcom \
+              linux-firmware-cirrus \
+              linux-firmware-radeon
+            verify_removed linux-firmware linux-firmware-intel linux-firmware-nvidia
+
+            echo '  → 卸载内核包...'
+            pacman -Rns --noconfirm \
+              linux-aarch64
+            verify_removed linux-aarch64 mkinitcpio mkinitcpio-busybox
+
+            echo '  → 卸载 netctl/dhcpcd...'
+            pacman -Rns --noconfirm \
+              netctl \
+              dhcpcd
+            verify_removed netctl dhcpcd
+
+            echo '  → 卸载 ex-vi-compat（vim 的依赖方，必须先卸）...'
+            pacman -Rns --noconfirm ex-vi-compat
+            verify_removed ex-vi-compat verify_removed vim vim-runtime
+
+            echo '  → 清理孤儿包...'
+            orphans=\$(pacman -Qdtq 2>/dev/null || true)
+            [[ -n \"\${orphans}\" ]] && pacman -Rns --noconfirm \${orphans} || true
+          "
+
+          echo "▶ 卸载不需要的包后 rootfs: $(sudo du -sh ${ROOTFS_DIR} | awk '{print $1}')"
+          echo "▶ 安装需要的基础包..."
+          sudo chroot "${ROOTFS_DIR}" /bin/bash -c "
+            set -e
+            pacman -Sy --noconfirm --needed \
+              openssh sudo curl wget ca-certificates tzdata \
+              iproute2 \
+              net-tools iputils bind \
+              wireless_tools wpa_supplicant wireless-regdb \
+              bash-completion htop nano nftables bc \
+              uboot-tools parted \
+              btrfs-progs e2fsprogs dosfstools \
+              lsof file procps-ng cronie \
+              rsync logrotate perl
+          "
+
+          # ── 额外包 ────────────────────────────────────────────────────
+          if [[ -n "${EXTRA_PKGS}" ]]; then
+            echo "▶ 安装额外包: ${EXTRA_PKGS}"
+            sudo chroot "${ROOTFS_DIR}" pacman -Sy --noconfirm --needed ${EXTRA_PKGS}
+          fi
+
+          echo "▶ 执行 pacman -Syu 全量更新..."
+          sudo chroot "${ROOTFS_DIR}" pacman -Syu --noconfirm --needed
+
+          echo "▶ 收尾清理..."
+          sudo chroot "${ROOTFS_DIR}" /bin/bash -c "
+            set -e
+            echo '  → 清 pacman 包缓存...'
+            pacman -Sc --noconfirm >/dev/null 2>&1 || true
+            rm -rf /var/cache/pacman/pkg/*
+            rm -f /var/log/pacman.log
+
+            echo '  → 清空日志...'
+            find /var/log -type f -exec truncate -s 0 {} \; 2>/dev/null || true
+            rm -rf /var/log/journal/*
+
+            echo '  → 删除文档/man/info...'
+            rm -rf /usr/share/doc/*
+            rm -rf /usr/share/man/*
+            rm -rf /usr/share/info/*
+            rm -rf /usr/share/gtk-doc/*
+            rm -rf /usr/share/readline/*
+
+            echo '  → 精简 locale（只留 en_US、zh_CN、zh_TW）...'
+            find /usr/share/locale -type f \
+              ! -name 'en_US*' ! -name 'zh_CN*' ! -name 'zh_TW*' \
+              ! -name 'locale.alias' \
+              -delete 2>/dev/null || true
+            find /usr/share/locale -type d -empty -delete 2>/dev/null || true
+
+            echo '  → 清理 root 家目录残留与临时文件...'
+            rm -rf /root/.cache /root/.bash_history
+            rm -rf /tmp/* /var/tmp/*
+            rm -rf /var/lib/pacman/sync/*
+          "
+          echo "▶ 最终 rootfs: $(sudo du -sh ${ROOTFS_DIR} | awk '{print $1}')"
+
+          # ── 时区 / locale / hostname ──────────────────────────────────
+          sudo chroot "${ROOTFS_DIR}" ln -sf "/usr/share/zoneinfo/${TZ_VAL}" /etc/localtime
+          sudo chroot "${ROOTFS_DIR}" bash -c "
+            sed -i 's/^# *\(en_US.UTF-8\)/\1/' /etc/locale.gen
+            locale-gen
+            locale -a | grep -qi 'en_US.utf8' || { echo 'ERROR: en_US.UTF-8 locale 生成失败'; exit 1; }
+            echo 'LANG=en_US.UTF-8' > /etc/locale.conf
+          "
+
+          sudo chroot "${ROOTFS_DIR}" /bin/bash -c "
+            find /usr/share/i18n -type f \
+              ! -name 'C*' ! -name 'POSIX*' ! -name 'i18n*' \
+              -delete 2>/dev/null || true
+            find /usr/share/i18n -type d -empty -delete 2>/dev/null || true
+          "
+
+          echo "${HOSTNAME_VAL}" | sudo tee "${ROOTFS_DIR}/etc/hostname" > /dev/null
+          printf '127.0.0.1\tlocalhost\n127.0.1.1\t%s\n::1\tlocalhost ip6-localhost ip6-loopback\n' \
+            "${HOSTNAME_VAL}" | sudo tee "${ROOTFS_DIR}/etc/hosts" > /dev/null
+
+          # ── SSH ───────────────────────────────────────────────────────
+          sudo mkdir -p -m 0755 "${ROOTFS_DIR}/run/sshd"
+          sudo sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/'             "${ROOTFS_DIR}/etc/ssh/sshd_config"
+          sudo sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' "${ROOTFS_DIR}/etc/ssh/sshd_config"
+
+          # ── root 密码 ─────────────────────────────────────────────────
+          ROOT_HASH="$(openssl passwd -6 "${ROOT_PASSWORD}")"
+          sudo sed -i "s|^root:[^:]*|root:${ROOT_HASH}|" "${ROOTFS_DIR}/etc/shadow"
+
+          # ── systemd 超时 ──────────────────────────────────────────────
+          SYS_CONF="${ROOTFS_DIR}/etc/systemd/system.conf"
+          [[ -f "${SYS_CONF}" ]] && {
+            sudo sed -i "s|^#*DefaultTimeoutStartSec.*|DefaultTimeoutStartSec=10s|g" "${SYS_CONF}"
+            sudo sed -i "s|^#*DefaultTimeoutStopSec.*|DefaultTimeoutStopSec=10s|g"   "${SYS_CONF}"
+          } || true
+
+          # ── enable 基础系统服务（平台脚本/服务由 rebuild 阶段统一注入）──
+          sudo chroot "${ROOTFS_DIR}" /bin/bash -c "
+            systemctl enable sshd
+            systemctl enable systemd-networkd.service
+            systemctl enable systemd-timesyncd
+            systemctl enable nftables               2>/dev/null || true
+
+            systemctl disable systemd-pstore.service             2>/dev/null || true
+          "
+
+          # ── 卸载 chroot 挂载点 ────────────────────────────────────────
+          umount_chroot
+          trap - EXIT
+
+          # ── 恢复 /etc/pacman.conf → 面向最终用户的官方 GeoIP 镜像 ──
+          sudo tee "${ROOTFS_DIR}/etc/pacman.conf" > /dev/null << 'PACMAN_USER_EOF'
+          [options]
+          Architecture = aarch64
+          SigLevel = Required DatabaseOptional
+          LocalFileSigLevel = Optional
+          HoldPkg = pacman glibc
+
+          [core]
+          Include = /etc/pacman.d/mirrorlist
+
+          [extra]
+          Include = /etc/pacman.d/mirrorlist
+
+          [alarm]
+          Include = /etc/pacman.d/mirrorlist
+
+          [aur]
+          Include = /etc/pacman.d/mirrorlist
+          PACMAN_USER_EOF
+          sudo sed -i 's/^[[:space:]]*//' "${ROOTFS_DIR}/etc/pacman.conf"
+
+          sudo mkdir -p "${ROOTFS_DIR}/etc/pacman.d"
+          printf 'Server = http://mirror.archlinuxarm.org/$arch/$repo\n' \
+            | sudo tee "${ROOTFS_DIR}/etc/pacman.d/mirrorlist" > /dev/null
+
+          # ── fstab ─────────────────────────────────────────────────────
+          printf 'LABEL=ROOTFS\t/\text4\tdefaults,noatime,nodiratime,commit=600,errors=remount-ro\t0 1\n' \
+            | sudo tee    "${ROOTFS_DIR}/etc/fstab" > /dev/null
+          printf 'LABEL=BOOT\t/boot\tvfat\tdefaults\t0 2\n' \
+            | sudo tee -a "${ROOTFS_DIR}/etc/fstab" > /dev/null
+
+          sudo mkdir -p "${ROOTFS_DIR}/usr/lib/modules"
+
+          # ── /etc/os-release（满足 rebuild 的 ID/VERSION_CODENAME 检查）──
+          sudo rm -f "${ROOTFS_DIR}/etc/os-release"
+          sudo tee "${ROOTFS_DIR}/etc/os-release" > /dev/null << 'OSREL_EOF'
+          NAME="Arch Linux ARM"
+          ID=arch
+          ID_LIKE=arch
+          VERSION_CODENAME=rolling
+          VERSION_ID=rolling
+          PRETTY_NAME="Arch Linux ARM"
+          ANSI_COLOR="38;2;23;147;209"
+          HOME_URL="https://archlinuxarm.org/"
+          DOCUMENTATION_URL="https://archlinuxarm.org/wiki"
+          SUPPORT_URL="https://archlinuxarm.org/forum"
+          BUG_REPORT_URL="https://github.com/archlinuxarm/PKGBUILDs/issues"
+          OSREL_EOF
+          sudo sed -i 's/^[[:space:]]*//' "${ROOTFS_DIR}/etc/os-release"
+          sudo cp "${ROOTFS_DIR}/etc/os-release" "${ROOTFS_DIR}/usr/lib/os-release"
+
+          echo "▶ rootfs 最终大小: $(sudo du -sh ${ROOTFS_DIR} | awk '{print $1}')"
+          echo "status=success" >> "${GITHUB_OUTPUT}"
+
+      # ── 4. 打包 rootfs tar.gz ────────────────────────────────────────
+      - name: Package rootfs
+        id: package_rootfs
+        if: ${{ steps.build_rootfs.outputs.status == 'success' && !cancelled() }}
+        run: |
+          set -euo pipefail
+          OUT_DIR="${GITHUB_WORKSPACE}/output"
+          mkdir -p "${OUT_DIR}"
+
+          TARBALL="Arch_${ARCH_RELEASE}_rootfs.tar.gz"
+          echo "▶ 打包 → ${TARBALL} ..."
+          sudo tar -czf "${OUT_DIR}/${TARBALL}" -C "${ROOTFS_DIR}" .
+          echo "▶ 大小: $(du -sh ${OUT_DIR}/${TARBALL} | awk '{print $1}')"
+
+          cd "${OUT_DIR}"
+          sha256sum "${TARBALL}" > "${TARBALL}.sha256"
+
+          BUILT_DATE="$(date -u '+%Y-%m-%d %H:%M UTC')"
+          echo "TARBALL=${TARBALL}"       >> "${GITHUB_OUTPUT}"
+          echo "TARBALL_PATH=${OUT_DIR}/${TARBALL}" >> "${GITHUB_OUTPUT}"
+          echo "SHA256_PATH=${OUT_DIR}/${TARBALL}.sha256" >> "${GITHUB_OUTPUT}"
+          echo "OUT_DIR=${OUT_DIR}"       >> "${GITHUB_OUTPUT}"
+          echo "BUILT_DATE=${BUILT_DATE}" >> "${GITHUB_OUTPUT}"
+          echo "status=success"           >> "${GITHUB_OUTPUT}"
+
+      # ── 5. 将 rootfs 打包成 rebuild 脚本可直接识别的 "*.img.gz" 镜像 ──
+      #        产物文件名使用发行版名称 + 版本信息，不再伪装为 Armbian 镜像 ──
+      - name: Package rootfs into an image
+        id: wrap_image
+        if: ${{ steps.package_rootfs.outputs.status == 'success' && !cancelled() }}
+        run: |
+          set -euo pipefail
+          WORK="${RUNNER_TEMP}/wrap"
+          sudo rm -rf "${WORK}" && mkdir -p "${WORK}"
+
+          # rootfs 实际占用大小（MiB）+ 40% 余量 + 512MiB 兜底，
+          # 保证后续 apt/内核替换等操作有足够空间
+          used_mb=$(sudo du -sm "${ROOTFS_DIR}" | awk '{print $1}')
+          img_mb=$(( used_mb * 14 / 10 + 512 ))
+
+          IMG_NAME="Arch_${ARCH_RELEASE}_arm64_rootfs.img"
+          IMG_PATH="${WORK}/${IMG_NAME}"
+
+          echo "▶ 创建空白镜像: ${img_mb}MiB"
+          truncate -s "${img_mb}M" "${IMG_PATH}"
+
+          # 单分区即可：extract_armbian() 里若无 p2 会自动回退用 p1
+          parted -s "${IMG_PATH}" mklabel msdos
+          parted -s "${IMG_PATH}" mkpart primary ext4 1MiB 100%
+
+          LOOPDEV=$(sudo losetup -P -f --show "${IMG_PATH}")
+          sudo mkfs.ext4 -F -L ROOTFS "${LOOPDEV}p1"
+
+          MNT="${WORK}/mnt"
+          mkdir -p "${MNT}"
+          sudo mount "${LOOPDEV}p1" "${MNT}"
+
+          echo "▶ 写入 rootfs 内容..."
+          sudo cp -a "${ROOTFS_DIR}/." "${MNT}/"
+
+          # 确认 os-release 含必需字段（rebuild 脚本的 extract_armbian 会读取 ID / VERSION_CODENAME）
+          grep -q '^ID=' "${MNT}/etc/os-release"
+          grep -q '^VERSION_CODENAME=' "${MNT}/etc/os-release" || \
+            echo "VERSION_CODENAME=rolling" | sudo tee -a "${MNT}/etc/os-release" > /dev/null
+
+          sync
+          sudo umount "${MNT}"
+          sudo losetup -d "${LOOPDEV}"
+
+          echo "▶ 压缩镜像..."
+          if command -v pigz >/dev/null 2>&1; then
+            pigz -f "${IMG_PATH}"
+          else
+            gzip -f "${IMG_PATH}"
+          fi
+
+          OUT_DIR="${GITHUB_WORKSPACE}/output"
+          mkdir -p "${OUT_DIR}"
+          mv -f "${IMG_PATH}.gz" "${OUT_DIR}/"
+          IMG_GZ_NAME="${IMG_NAME}.gz"
+
+          cd "${OUT_DIR}"
+          sha256sum "${IMG_GZ_NAME}" > "${IMG_GZ_NAME}.sha256"
+
+          echo "IMG_GZ_NAME=${IMG_GZ_NAME}" >> "${GITHUB_OUTPUT}"
+          echo "IMG_GZ_PATH=${OUT_DIR}/${IMG_GZ_NAME}" >> "${GITHUB_OUTPUT}"
+          echo "IMG_GZ_SHA256_PATH=${OUT_DIR}/${IMG_GZ_NAME}.sha256" >> "${GITHUB_OUTPUT}"
+          echo "status=success" >> "${GITHUB_OUTPUT}"
+
+      # ── 6. 发布 rootfs 到 Release ────────────────────────────────────
+      - name: Release rootfs
+        uses: ncipollo/release-action@main
+        if: ${{ steps.package_rootfs.outputs.status == 'success' && !cancelled() }}
+        with:
+          tag: "rootfs"
+          name: "rootfs"
+          artifacts: |
+            ${{ steps.wrap_image.outputs.IMG_GZ_PATH }}
+          allowUpdates: true
+          token: ${{ secrets.GITHUB_TOKEN }}

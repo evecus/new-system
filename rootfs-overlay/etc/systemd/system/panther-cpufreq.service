@@ -1,0 +1,9 @@
+[Unit]
+Description=Panther CPU frequency policy
+After=multi-user.target
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/panther-cpufreq.sh
+RemainAfterExit=yes
+[Install]
+WantedBy=multi-user.target

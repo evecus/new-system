@@ -1,0 +1,5 @@
+# 调频策略: 见 /sys/devices/system/cpu/cpufreq/policy0/scaling_available_governors
+GOVERNOR="schedutil"
+# 留空则不修改, 频率列表见 scaling_available_frequencies
+MIN_SPEED=""
+MAX_SPEED=""

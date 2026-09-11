@@ -1,0 +1,71 @@
+name: rebuild (own kernel)
+
+on:
+  repository_dispatch:
+  workflow_dispatch:
+    inputs:
+      kernel_deb_url:
+        description: "我们自建内核的 linux-image-*.deb 直链 (来自 163jm/kernel 的 Release)。这是唯一的内核来源。"
+        required: true
+        default: ""
+      rootfs_url:
+        description: "rootfs 底座镜像直链 (*.img.gz, 来自本仓库 debian.yml 等的 Release)"
+        required: true
+        default: ""
+      firmware_url:
+        description: "WiFi/BT 固件包直链 (tar.gz, 解开后含 brcm/ 目录; 留空则无 WiFi 固件)"
+        required: false
+        default: ""
+      root_mb:
+        description: "rootfs 分区大小 MiB (不含 boot 512M)"
+        required: false
+        default: "2560"
+      root_password:
+        description: "镜像 root 初始密码"
+        required: false
+        default: "1234"
+      ssh_pubkey:
+        description: "SSH 公钥 (可选, 写入 root 的 authorized_keys)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  rebuild:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Assemble image (armbian-free)
+        run: |
+          sudo -E \
+            KERNEL_DEB_URL="${{ inputs.kernel_deb_url }}" \
+            ROOTFS_URL="${{ inputs.rootfs_url }}" \
+            FIRMWARE_URL="${{ inputs.firmware_url }}" \
+            ROOT_MB="${{ inputs.root_mb }}" \
+            ROOT_PASS="${{ inputs.root_password }}" \
+            SSH_PUBKEY="${{ inputs.ssh_pubkey }}" \
+            OUT="${GITHUB_WORKSPACE}/out" \
+            bash rebuild-panther-x2.sh
+
+      - name: Prepare release files
+        run: |
+          mkdir -p release
+          mv out/*.img.xz release/
+          echo "IMG=$(ls release/*.img.xz)" >> $GITHUB_ENV
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: panther-x2-image
+          path: release/*
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          tag_name: image-${{ github.run_number }}
+          generate_release_notes: true

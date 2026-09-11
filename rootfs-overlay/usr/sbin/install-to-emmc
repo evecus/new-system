@@ -1,0 +1,67 @@
+#!/bin/sh
+# SD 卡系统安装到 eMMC — 简化版 armbian-update(适配本镜像固定布局)
+# 原理: 整盘 dd(含 GPT/u-boot/分区) → 重生成目标分区 UUID → 修 fstab/extlinux → 扩容
+set -e
+
+SRC=$(findmnt -no SOURCE /) 2>/dev/null || SRC=""
+[ -n "$SRC" ] || { echo "无法确定当前根分区"; exit 1; }
+SRC_DISK=${SRC%p[0-9]*}
+case "$SRC_DISK" in
+    /dev/mmcblk[0-9]) ;;
+    *) echo "当前系统不在 mmc 设备上($SRC_DISK), 本脚本仅支持 SD->eMMC 场景"; exit 1 ;;
+esac
+
+# 目标 = 另一个 mmc 整盘设备
+TARGET=""
+for d in /sys/block/mmcblk*; do
+    dev="/dev/${d##*/}"
+    [ "$dev" = "$SRC_DISK" ] && continue
+    case "$dev" in *boot*|*rpmb*) continue ;; esac
+    [ -b "$dev" ] && TARGET="$dev" && break
+done
+[ -n "$TARGET" ] || { echo "未找到目标 eMMC 设备"; exit 1; }
+
+echo "源  (SD  ): $SRC_DISK"
+echo "目标(eMMC): $TARGET"
+echo "!!! 这将整盘覆盖 $TARGET , eMMC 上所有数据将丢失 !!!"
+printf "确认请输入 yes : "
+read -r ans
+[ "$ans" = "yes" ] || { echo "已取消"; exit 1; }
+
+echo "1/4 整盘复制(约数分钟, 取决于 SD 读速)..."
+dd if="$SRC_DISK" of="$TARGET" bs=4M conv=fsync status=progress
+sync
+partprobe "$TARGET" 2>/dev/null || blockdev --rereadpt "$TARGET" 2>/dev/null || true
+
+echo "2/4 重生成目标分区 UUID(避免与 SD 冲突)..."
+for p in "${TARGET}p1" "${TARGET}p2"; do
+    tune2fs -U random "$p" >/dev/null
+done
+NEW_ROOT_UUID=$(lsblk -no UUID "${TARGET}p2" | head -1)
+NEW_BOOT_UUID=$(lsblk -no UUID "${TARGET}p1" | head -1)
+
+echo "3/4 修正目标系统 fstab / extlinux..."
+TMP=/tmp/e2m.$$
+mkdir -p "$TMP"
+mount "${TARGET}p2" "$TMP"
+echo "UUID=${NEW_ROOT_UUID} / ext4 defaults,noatime 0 1" > "$TMP/etc/fstab"
+echo "UUID=${NEW_BOOT_UUID} /boot ext4 defaults 0 2" >> "$TMP/etc/fstab"
+mkdir -p "$TMP/tmp_boot"
+mount "${TARGET}p1" "$TMP/tmp_boot"
+sed -i "s|root=UUID=[0-9a-f-]*|root=UUID=${NEW_ROOT_UUID}|" "$TMP/tmp_boot/extlinux/extlinux.conf"
+umount "$TMP/tmp_boot"
+rm -f "$TMP/var/lib/panther/resize-done"   # 让目标系统首启自动扩容
+umount "$TMP"
+
+echo "4/4 扩容目标 root 分区..."
+ROOT_DEV="${TARGET}p2"
+START=$(cat /sys/class/block/${ROOT_DEV##*/}/start)
+DISK_SECT=$(cat /sys/class/block/${TARGET##*/}/size)
+NEW_SECT=$((DISK_SECT - START))
+blockdev --resize-partition "$ROOT_DEV" $((NEW_SECT * 512)) 2>/dev/null || true
+resize2fs "$ROOT_DEV" || true
+
+sync
+echo ""
+echo "完成! 关机后拔掉 SD 卡, 从 eMMC 启动。"
+echo "  poweroff"

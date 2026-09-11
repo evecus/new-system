@@ -1,0 +1,9 @@
+[Unit]
+Description=Panther swapfile
+After=local-fs.target
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/panther-swapfile.sh
+RemainAfterExit=yes
+[Install]
+WantedBy=multi-user.target

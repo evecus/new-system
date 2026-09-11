@@ -1,0 +1,519 @@
+#==========================================================================
+# 用途：构建 Alpine Linux rootfs（通用，不含机型/平台信息）
+#
+# 产出：Alpine_{release}_rootfs.tar.gz → 发布到 Release tag: rootfs-alpine-{release}
+# 后续：rebuild.yml 下载此 rootfs，通过 -r <dir> -d alpine -b <board> 构建固件
+#
+# Alpine 特点：
+#   - 使用 musl libc（非 glibc）
+#   - 使用 OpenRC（非 systemd）
+#   - 包管理器 apk（非 apt/pacman）
+#   - 官方提供 aarch64 mini rootfs tarball
+#==========================================================================
+name: RootFS Alpine
+
+on:
+  workflow_dispatch:
+    inputs:
+      alpine_release:
+        description: "Alpine 版本（latest-stable=最新稳定版, edge=滚动版）"
+        required: false
+        default: "latest-stable"
+        type: choice
+        options:
+          - latest-stable
+          - edge
+
+      root_password:
+        description: "root 密码"
+        required: false
+        default: "1234"
+
+      hostname:
+        description: "主机名"
+        required: false
+        default: "alpine"
+
+      timezone:
+        description: "时区"
+        required: false
+        default: "Asia/Shanghai"
+        type: choice
+        options:
+          - Asia/Shanghai
+          - Asia/Tokyo
+          - America/New_York
+          - Europe/London
+          - UTC
+
+      extra_packages:
+        description: "额外安装的包，空格分隔"
+        required: false
+        default: ""
+
+      builder_name:
+        description: "构建者签名"
+        required: false
+        default: "mybuilder"
+
+env:
+  TZ: UTC
+  ROOTFS_DIR: /builder/alpine-rootfs
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: write
+    if: ${{ github.event.repository.owner.id == github.event.sender.id }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── 1. 初始化环境 ──────────────────────────────────────────────────
+      - name: Initialize environment
+        id: init
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          docker rmi -f $(docker images -q) 2>/dev/null || true
+          [[ -n "${AGENT_TOOLSDIRECTORY}" ]] && sudo rm -rf "${AGENT_TOOLSDIRECTORY}"
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android 2>/dev/null
+          sudo swapoff -a && sudo rm -f /swapfile /mnt/swapfile
+
+          sudo -E apt-get -y update
+          sudo -E apt-get -y purge \
+            azure-cli ghc* zulu* llvm* firefox google* dotnet* \
+            powershell openjdk* mongodb* moby* 2>/dev/null || true
+          sudo -E apt-get -y install \
+            parted e2fsprogs dosfstools btrfs-progs \
+            u-boot-tools uuid-runtime openssl pigz \
+            git curl wget xz-utils lz4 zstd pv jq rsync
+          sudo -E apt-get -y autoremove --purge
+          sudo -E apt-get clean
+          sudo -E timedatectl set-timezone "${TZ}"
+
+          echo "ALPINE_RELEASE=${{ inputs.alpine_release || 'edge' }}" >> "${GITHUB_ENV}"
+          echo "ROOT_PASSWORD=${{ inputs.root_password   || '1234' }}"   >> "${GITHUB_ENV}"
+          echo "HOSTNAME_VAL=${{ inputs.hostname         || 'alpine' }}"  >> "${GITHUB_ENV}"
+          echo "TZ_VAL=${{ inputs.timezone               || 'Asia/Shanghai' }}" >> "${GITHUB_ENV}"
+          echo "EXTRA_PKGS=${{ inputs.extra_packages     || '' }}"         >> "${GITHUB_ENV}"
+          echo "status=success" >> "${GITHUB_OUTPUT}"
+
+      # ── 2. 合并磁盘空间 ───────────────────────────────────────────────
+      - name: Create build disk
+        if: ${{ steps.init.outputs.status == 'success' && !cancelled() }}
+        run: |
+          mnt_size=$(expr $(df -h /mnt | tail -1 | awk '{print $4}' | sed 's/[[:alpha:]]//g' | sed 's/\..*//') - 1)
+          root_size=$(expr $(df -h / | tail -1 | awk '{print $4}' | sed 's/[[:alpha:]]//g' | sed 's/\..*//') - 4)
+          sudo truncate -s "${mnt_size}G"  /mnt/mnt.img
+          sudo truncate -s "${root_size}G" /root.img
+          sudo losetup /dev/loop6 /mnt/mnt.img
+          sudo losetup /dev/loop7 /root.img
+          sudo pvcreate /dev/loop6 /dev/loop7
+          sudo vgcreate github /dev/loop6 /dev/loop7
+          sudo lvcreate -n runner -l 100%FREE github
+          sudo mkfs.xfs -f -i sparse=0 /dev/github/runner
+          sudo mkdir -p /builder
+          sudo mount /dev/github/runner /builder
+          sudo chown -R runner:runner /builder
+          echo "可用空间: $(df -h /builder | tail -1 | awk '{print $4}')"
+
+      # ── 3. 构建 Alpine rootfs ─────────────────────────────────────────
+      # 下载官方 aarch64 mini rootfs，chroot 进去 apk 装包 + 精简
+      - name: Build Alpine rootfs
+        id: build_rootfs
+        if: ${{ steps.init.outputs.status == 'success' && !cancelled() }}
+        run: |
+          set -euo pipefail
+
+          sudo mkdir -p "${ROOTFS_DIR}"
+
+          # ── chroot helper ──────────────────────────────────────────────
+          mount_chroot() {
+              sudo mount -t proc     proc     "${ROOTFS_DIR}/proc"
+              sudo mount -t sysfs    sysfs    "${ROOTFS_DIR}/sys"
+              sudo mount --bind      /dev     "${ROOTFS_DIR}/dev"
+              sudo mount --bind      /dev/pts "${ROOTFS_DIR}/dev/pts"
+              sudo mount -t tmpfs    tmpfs    "${ROOTFS_DIR}/run"
+          }
+          umount_chroot() {
+              sudo umount -R "${ROOTFS_DIR}/run"      2>/dev/null || true
+              sudo umount -R "${ROOTFS_DIR}/dev/pts"  2>/dev/null || true
+              sudo umount -R "${ROOTFS_DIR}/dev"      2>/dev/null || true
+              sudo umount -R "${ROOTFS_DIR}/sys"      2>/dev/null || true
+              sudo umount -R "${ROOTFS_DIR}/proc"     2>/dev/null || true
+          }
+          trap umount_chroot EXIT
+
+          # ── 下载 Alpine 官方 aarch64 mini rootfs ──────────────────────
+          # 文件名规则（均需从目录列表查询，因为带补丁号）：
+          #   latest-stable → alpine-minirootfs-3.24.1-aarch64.tar.gz（跟随上游最新）
+          #   edge          → alpine-minirootfs-edge-aarch64.tar.gz（固定名，但仍查以防变更）
+          #
+          # 多镜像 fallback：
+          #   1. dl-cdn.alpinelinux.org  — 官方 CDN（全球）
+          #   2. mirrors.kernel.org      — kernel.org 镜像
+          #   3. mirrors.tuna.tsinghua.edu.cn — 清华 TUNA（备用，回国可用）
+
+          DIR_URL="https://dl-cdn.alpinelinux.org/alpine/${ALPINE_RELEASE}/releases/aarch64/"
+          echo "▶ 查询 ${ALPINE_RELEASE} 最新 minirootfs 文件名..."
+          echo "▶ 目录: ${DIR_URL}"
+
+          if [[ "${ALPINE_RELEASE}" == "edge" ]]; then
+            # edge: 文件名固定为 alpine-minirootfs-edge-aarch64.tar.gz
+            ALPINE_FILE="alpine-minirootfs-edge-aarch64.tar.gz"
+          else
+            # latest-stable: 从目录列表提取最新版本号（排除 _rc 预发布版）
+            # 目录列表格式：<a href="alpine-minirootfs-3.24.1-aarch64.tar.gz">...
+            ALPINE_FILE="$(curl -sL --max-time 30 "${DIR_URL}" \
+              | grep -oE 'alpine-minirootfs-[0-9]+\.[0-9]+\.[0-9]+-aarch64\.tar\.gz' \
+              | sort -V | tail -1)"
+            if [[ -z "${ALPINE_FILE}" ]]; then
+              echo "::error::无法从 ${DIR_URL} 查询到 minirootfs 文件名"
+              exit 1
+            fi
+          fi
+          echo "▶ 目标文件: ${ALPINE_FILE}"
+
+          # 提取真实版本号用于 apk 源路径和标识
+          # 文件名格式：alpine-minirootfs-3.24.1-aarch64.tar.gz → 3.24.1
+          # apk 源路径需要 v3.24（主版本.次版本，加 v 前缀）
+          # edge 的 apk 源路径就是 edge
+          if [[ "${ALPINE_RELEASE}" == "edge" ]]; then
+            ALPINE_REPO_VER="edge"
+            ALPINE_VERSION_ID="edge"
+          else
+            ALPINE_VERSION_ID="$(echo "${ALPINE_FILE}" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')"
+            # 从 3.24.1 提取 v3.24（apk 仓库路径格式）
+            ALPINE_REPO_VER="v$(echo "${ALPINE_VERSION_ID}" | cut -d'.' -f1,2)"
+          fi
+          echo "▶ 真实版本: ${ALPINE_VERSION_ID} → apk 源路径: ${ALPINE_REPO_VER}"
+
+          ALPINE_MIRRORS=(
+            "https://dl-cdn.alpinelinux.org/alpine/${ALPINE_RELEASE}/releases/aarch64/${ALPINE_FILE}"
+            "https://mirrors.kernel.org/alpine/${ALPINE_RELEASE}/releases/aarch64/${ALPINE_FILE}"
+            "https://mirrors.tuna.tsinghua.edu.cn/alpine/${ALPINE_RELEASE}/releases/aarch64/${ALPINE_FILE}"
+          )
+
+          downloaded=0
+          for url in "${ALPINE_MIRRORS[@]}"; do
+            echo "▶ 尝试下载: ${url}"
+            if wget -q --show-progress --tries=3 --timeout=30 -c -O /tmp/alpine-rootfs.tar.gz "${url}"; then
+              downloaded=1
+              echo "▶ 下载成功: ${url}"
+              break
+            fi
+            echo "::warning::下载失败: ${url}，尝试下一个镜像"
+          done
+          [[ "${downloaded}" -eq "1" ]] || { echo "::error::所有 Alpine 镜像均下载失败"; exit 1; }
+          echo "▶ 大小: $(du -sh /tmp/alpine-rootfs.tar.gz | awk '{print $1}')"
+
+          # ── 解压 ──────────────────────────────────────────────────────
+          echo "▶ 解压到 ${ROOTFS_DIR}..."
+          sudo bsdtar -xpf /tmp/alpine-rootfs.tar.gz -C "${ROOTFS_DIR}" 2>/dev/null || \
+            sudo tar -xpf /tmp/alpine-rootfs.tar.gz -C "${ROOTFS_DIR}"
+          rm -f /tmp/alpine-rootfs.tar.gz
+          echo "▶ 解压完成: $(sudo du -sh ${ROOTFS_DIR} | awk '{print $1}')"
+
+          # ── 配置 rootfs 的 resolv.conf ────────────────────────────────
+          sudo tee "${ROOTFS_DIR}/etc/resolv.conf" > /dev/null << 'RESOLV_EOF'
+          nameserver 8.8.8.8
+          nameserver 8.8.4.4
+          nameserver 1.1.1.1
+          RESOLV_EOF
+          sudo sed -i 's/^[[:space:]]*//' "${ROOTFS_DIR}/etc/resolv.conf"
+
+          # ── 配置 apk 源（多镜像）──────────────────────────────────────
+          # ALPINE_REPO_VER 是真实版本路径，如 v3.24 或 edge
+          sudo mkdir -p "${ROOTFS_DIR}/etc/apk"
+          sudo tee "${ROOTFS_DIR}/etc/apk/repositories" > /dev/null << APK_REPO_EOF
+          https://dl-cdn.alpinelinux.org/alpine/${ALPINE_REPO_VER}/main
+          https://dl-cdn.alpinelinux.org/alpine/${ALPINE_REPO_VER}/community
+          https://mirrors.kernel.org/alpine/${ALPINE_REPO_VER}/main
+          https://mirrors.kernel.org/alpine/${ALPINE_REPO_VER}/community
+          APK_REPO_EOF
+          sudo sed -i 's/^[[:space:]]*//' "${ROOTFS_DIR}/etc/apk/repositories"
+
+          # ── mount chroot 挂载点 ───────────────────────────────────────
+          echo "▶ mount chroot 挂载点..."
+          mount_chroot
+
+          echo "▶ 精简前 rootfs: $(sudo du -sh ${ROOTFS_DIR} | awk '{print $1}')"
+
+          # ── 初始化 apk + 更新 ─────────────────────────────────────────
+          echo "▶ 初始化 apk + 更新..."
+          sudo chroot "${ROOTFS_DIR}" /bin/sh -c "
+            set -e
+            apk update
+            apk upgrade --no-cache
+          "
+
+          # ── 安装基础包 ────────────────────────────────────────────────
+          # Alpine 包名注意：
+          #   - openssh (非 openssh-server)
+          #   - networkmanager (NM 在 community 仓库)
+          #   - openrc (Alpine 默认 init，已预装)
+          #   - busybox-suid (提供 ping 等需要 capability 的工具)
+          echo "▶ 安装基础软件包..."
+          sudo chroot "${ROOTFS_DIR}" /bin/sh -c "
+            set -e
+            apk add --no-cache \
+              openssh \
+              sudo \
+              curl \
+              wget \
+              ca-certificates \
+              tzdata \
+              networkmanager \
+              networkmanager-cli \
+              networkmanager-tui \
+              networkmanager-wifi \
+              networkmanager-ppp \
+              iptables \
+              iproute2 \
+              iputils \
+              bind-tools \
+              wireless-tools \
+              wpa_supplicant \
+              wireless-regdb \
+              bash \
+              bash-completion \
+              htop \
+              nano \
+              vim \
+              less \
+              util-linux \
+              parted \
+              e2fsprogs \
+              e2fsprogs-extra \
+              dosfstools \
+              btrfs-progs \
+              btrfs-progs-extra \
+              lsof \
+              file \
+              procps \
+              rsync \
+              perl \
+              bc \
+              chrony \
+              openrc \
+              busybox-suid \
+              shadow
+
+            # 验证关键包
+            for p in openssh networkmanager rsync perl; do
+              apk -e info \${p} >/dev/null 2>&1 || { echo \"ERROR: 关键包 \${p} 安装失败\"; exit 1; }
+            done
+          "
+
+          # ── 额外包 ────────────────────────────────────────────────────
+          if [[ -n "${EXTRA_PKGS}" ]]; then
+            echo "▶ 安装额外包: ${EXTRA_PKGS}"
+            sudo chroot "${ROOTFS_DIR}" apk add --no-cache ${EXTRA_PKGS}
+          fi
+
+          # ── 清理 apk 缓存 ─────────────────────────────────────────────
+          echo "▶ 清理 apk 缓存..."
+          sudo chroot "${ROOTFS_DIR}" /bin/sh -c "
+            rm -rf /var/cache/apk/*
+            rm -rf /var/lib/apk/lists/*
+          "
+
+          # ── 时区 / hostname ───────────────────────────────────────────
+          sudo chroot "${ROOTFS_DIR}" /bin/sh -c "
+            ln -sf /usr/share/zoneinfo/${TZ_VAL} /etc/localtime
+            echo '${TZ_VAL}' > /etc/timezone
+          "
+          echo "${HOSTNAME_VAL}" | sudo tee "${ROOTFS_DIR}/etc/hostname" > /dev/null
+          printf '127.0.0.1\tlocalhost\n127.0.1.1\t%s\n::1\tlocalhost ip6-localhost ip6-loopback\n' \
+            "${HOSTNAME_VAL}" | sudo tee "${ROOTFS_DIR}/etc/hosts" > /dev/null
+
+          # ── SSH 配置 ──────────────────────────────────────────────────
+          sudo sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/'             "${ROOTFS_DIR}/etc/ssh/sshd_config"
+          sudo sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' "${ROOTFS_DIR}/etc/ssh/sshd_config"
+
+          # ── root 密码 ─────────────────────────────────────────────────
+          ROOT_HASH="$(openssl passwd -6 "${ROOT_PASSWORD}")"
+          sudo sed -i "s|^root:[^:]*|root:${ROOT_HASH}|" "${ROOTFS_DIR}/etc/shadow"
+
+          # ── NetworkManager 配置 ───────────────────────────────────────
+          sudo mkdir -p "${ROOTFS_DIR}/etc/NetworkManager"
+          sudo tee "${ROOTFS_DIR}/etc/NetworkManager/NetworkManager.conf" > /dev/null << 'NM_EOF'
+          [main]
+          plugins=keyfile
+          dhcp=internal
+          [keyfile]
+          unmanaged-devices=none
+          NM_EOF
+          sudo sed -i 's/^[[:space:]]*//' "${ROOTFS_DIR}/etc/NetworkManager/NetworkManager.conf"
+
+          # ── enable 基础系统服务（OpenRC）──────────────────────────────
+          # 平台脚本/服务由 rebuild 阶段统一注入（common-* OpenRC init 脚本）
+          sudo chroot "${ROOTFS_DIR}" /bin/sh -c "
+            # 基础系统服务
+            rc-update add sshd default
+            rc-update add networkmanager default
+            rc-update add chronyd default
+            rc-update add networking boot 2>/dev/null || true
+
+            # 硬件相关
+            rc-update add devfs sysinit 2>/dev/null || true
+            rc-update add dmesg sysinit 2>/dev/null || true
+            rc-update add mdev sysinit 2>/dev/null || true
+
+            # 默认运行级
+            rc-update add hostname boot 2>/dev/null || true
+            rc-update add bootmisc boot 2>/dev/null || true
+            rc-update add syslog boot 2>/dev/null || true
+            rc-update add mount-ro shutdown 2>/dev/null || true
+            rc-update add killprocs shutdown 2>/dev/null || true
+            rc-update add savecache shutdown 2>/dev/null || true
+          "
+
+          # ── 卸载 chroot 挂载点 ────────────────────────────────────────
+          umount_chroot
+          trap - EXIT
+
+          # ── 恢复 apk 源 → 面向最终用户的官方 CDN ──────────────────────
+          sudo tee "${ROOTFS_DIR}/etc/apk/repositories" > /dev/null << APK_USER_EOF
+          https://dl-cdn.alpinelinux.org/alpine/${ALPINE_REPO_VER}/main
+          https://dl-cdn.alpinelinux.org/alpine/${ALPINE_REPO_VER}/community
+          APK_USER_EOF
+          sudo sed -i 's/^[[:space:]]*//' "${ROOTFS_DIR}/etc/apk/repositories"
+
+          # ── fstab ─────────────────────────────────────────────────────
+          printf 'LABEL=ROOTFS\t/\text4\tdefaults,noatime,nodiratime,commit=600,errors=remount-ro\t0 1\n' \
+            | sudo tee    "${ROOTFS_DIR}/etc/fstab" > /dev/null
+          printf 'LABEL=BOOT\t/boot\tvfat\tdefaults\t0 2\n' \
+            | sudo tee -a "${ROOTFS_DIR}/etc/fstab" > /dev/null
+
+          sudo mkdir -p "${ROOTFS_DIR}/usr/lib/modules"
+
+          # ── /etc/os-release（满足 rebuild 的 ID/VERSION_CODENAME 检查）──
+          # Alpine mini rootfs 的 /etc/os-release 可能有也可能没有 VERSION_CODENAME
+          # 确保 ID=alpine 和 VERSION_CODENAME 存在
+          if ! grep -q "^ID=alpine" "${ROOTFS_DIR}/etc/os-release" 2>/dev/null; then
+            sudo tee "${ROOTFS_DIR}/etc/os-release" > /dev/null << OSREL_EOF
+          NAME="Alpine Linux"
+          ID=alpine
+          VERSION_ID=${ALPINE_VERSION_ID}
+          PRETTY_NAME="Alpine Linux ${ALPINE_VERSION_ID}"
+          HOME_URL="https://alpinelinux.org/"
+          BUG_REPORT_URL="https://gitlab.alpinelinux.org/alpine/aports/-/issues"
+          OSREL_EOF
+            sudo sed -i 's/^[[:space:]]*//' "${ROOTFS_DIR}/etc/os-release"
+          fi
+          # 确保 VERSION_CODENAME 存在（rebuild 需要它）
+          # 用真实版本号（如 3.24.1 或 edge）作为 codename
+          if ! grep -q "^VERSION_CODENAME=" "${ROOTFS_DIR}/etc/os-release" 2>/dev/null; then
+            echo "VERSION_CODENAME=${ALPINE_VERSION_ID}" | sudo tee -a "${ROOTFS_DIR}/etc/os-release" > /dev/null
+          fi
+
+          echo "▶ rootfs 最终大小: $(sudo du -sh ${ROOTFS_DIR} | awk '{print $1}')"
+          # 导出到 job env，供后续打包/Release 步骤使用
+          echo "ALPINE_VERSION_ID=${ALPINE_VERSION_ID}" >> "${GITHUB_ENV}"
+          echo "ALPINE_REPO_VER=${ALPINE_REPO_VER}"     >> "${GITHUB_ENV}"
+          echo "status=success" >> "${GITHUB_OUTPUT}"
+
+      # ── 4. 打包 rootfs tar.gz ────────────────────────────────────────
+      - name: Package rootfs
+        id: package_rootfs
+        if: ${{ steps.build_rootfs.outputs.status == 'success' && !cancelled() }}
+        run: |
+          set -euo pipefail
+          OUT_DIR="${GITHUB_WORKSPACE}/output"
+          mkdir -p "${OUT_DIR}"
+
+          TARBALL="Alpine_${ALPINE_VERSION_ID}_rootfs.tar.gz"
+          echo "▶ 打包 → ${TARBALL} ..."
+          sudo tar -czf "${OUT_DIR}/${TARBALL}" -C "${ROOTFS_DIR}" .
+          echo "▶ 大小: $(du -sh ${OUT_DIR}/${TARBALL} | awk '{print $1}')"
+
+          cd "${OUT_DIR}"
+          sha256sum "${TARBALL}" > "${TARBALL}.sha256"
+
+          BUILT_DATE="$(date -u '+%Y-%m-%d %H:%M UTC')"
+          echo "TARBALL=${TARBALL}"       >> "${GITHUB_OUTPUT}"
+          echo "TARBALL_PATH=${OUT_DIR}/${TARBALL}" >> "${GITHUB_OUTPUT}"
+          echo "SHA256_PATH=${OUT_DIR}/${TARBALL}.sha256" >> "${GITHUB_OUTPUT}"
+          echo "OUT_DIR=${OUT_DIR}"       >> "${GITHUB_OUTPUT}"
+          echo "BUILT_DATE=${BUILT_DATE}" >> "${GITHUB_OUTPUT}"
+          echo "status=success"           >> "${GITHUB_OUTPUT}"
+
+      # ── 5. 将 rootfs 打包成 rebuild 脚本可直接识别的 "*.img.gz" 镜像 ──
+      #        产物文件名使用发行版名称 + 版本信息，不再伪装为 Armbian 镜像 ──
+      - name: Package rootfs into an image
+        id: wrap_image
+        if: ${{ steps.package_rootfs.outputs.status == 'success' && !cancelled() }}
+        run: |
+          set -euo pipefail
+          WORK="${RUNNER_TEMP}/wrap"
+          sudo rm -rf "${WORK}" && mkdir -p "${WORK}"
+
+          # rootfs 实际占用大小（MiB）+ 40% 余量 + 512MiB 兜底，
+          # 保证后续 apt/内核替换等操作有足够空间
+          used_mb=$(sudo du -sm "${ROOTFS_DIR}" | awk '{print $1}')
+          img_mb=$(( used_mb * 14 / 10 + 512 ))
+
+          IMG_NAME="Alpine_${ALPINE_VERSION_ID}_arm64_rootfs.img"
+          IMG_PATH="${WORK}/${IMG_NAME}"
+
+          echo "▶ 创建空白镜像: ${img_mb}MiB"
+          truncate -s "${img_mb}M" "${IMG_PATH}"
+
+          # 单分区即可：extract_armbian() 里若无 p2 会自动回退用 p1
+          parted -s "${IMG_PATH}" mklabel msdos
+          parted -s "${IMG_PATH}" mkpart primary ext4 1MiB 100%
+
+          LOOPDEV=$(sudo losetup -P -f --show "${IMG_PATH}")
+          sudo mkfs.ext4 -F -L ROOTFS "${LOOPDEV}p1"
+
+          MNT="${WORK}/mnt"
+          mkdir -p "${MNT}"
+          sudo mount "${LOOPDEV}p1" "${MNT}"
+
+          echo "▶ 写入 rootfs 内容..."
+          sudo cp -a "${ROOTFS_DIR}/." "${MNT}/"
+
+          # 确认 os-release 含必需字段（rebuild 脚本的 extract_armbian 会读取 ID / VERSION_CODENAME）
+          grep -q '^ID=' "${MNT}/etc/os-release"
+          grep -q '^VERSION_CODENAME=' "${MNT}/etc/os-release" || \
+            echo "VERSION_CODENAME=${ALPINE_VERSION_ID}" | sudo tee -a "${MNT}/etc/os-release" > /dev/null
+
+          sync
+          sudo umount "${MNT}"
+          sudo losetup -d "${LOOPDEV}"
+
+          echo "▶ 压缩镜像..."
+          if command -v pigz >/dev/null 2>&1; then
+            pigz -f "${IMG_PATH}"
+          else
+            gzip -f "${IMG_PATH}"
+          fi
+
+          OUT_DIR="${GITHUB_WORKSPACE}/output"
+          mkdir -p "${OUT_DIR}"
+          mv -f "${IMG_PATH}.gz" "${OUT_DIR}/"
+          IMG_GZ_NAME="${IMG_NAME}.gz"
+
+          cd "${OUT_DIR}"
+          sha256sum "${IMG_GZ_NAME}" > "${IMG_GZ_NAME}.sha256"
+
+          echo "IMG_GZ_NAME=${IMG_GZ_NAME}" >> "${GITHUB_OUTPUT}"
+          echo "IMG_GZ_PATH=${OUT_DIR}/${IMG_GZ_NAME}" >> "${GITHUB_OUTPUT}"
+          echo "IMG_GZ_SHA256_PATH=${OUT_DIR}/${IMG_GZ_NAME}.sha256" >> "${GITHUB_OUTPUT}"
+          echo "status=success" >> "${GITHUB_OUTPUT}"
+
+      # ── 6. 发布 rootfs 到 Release ────────────────────────────────────
+      - name: Release rootfs
+        uses: ncipollo/release-action@main
+        if: ${{ steps.package_rootfs.outputs.status == 'success' && !cancelled() }}
+        with:
+          tag: "rootfs"
+          name: "rootfs"
+          artifacts: |
+            ${{ steps.wrap_image.outputs.IMG_GZ_PATH }}
+          allowUpdates: true
+          token: ${{ secrets.GITHUB_TOKEN }}
