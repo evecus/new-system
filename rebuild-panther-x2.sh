@@ -155,7 +155,10 @@ fi
 # --- 生成 uInitrd (本板 u-boot 的 boot.scr 无条件加载 uInitrd, 必须提供) ---
 # 方法: Debian busybox-static arm64 + 迷你 init 脚本 → cpio/gzip → mkimage
 # 等价于 ophub 在 arm64 系统里 update-initramfs + 99-uboot 钩子的产物, 但不依赖 arm64 系统
-step "4b/7 生成 uInitrd"
+step "4b/7 生成 uInitrd (deb 未自带时才生成)"
+if [[ -f "kernelpkg/boot/uInitrd-${KVER}" ]]; then
+    echo "内核 deb 已自带 uInitrd-${KVER}, 跳过 4b 生成"
+else
 mkdir -p "$WORK/initrd/bin" "$WORK/initrd/proc" "$WORK/initrd/sys" "$WORK/initrd/dev" "$WORK/initrd/run" "$WORK/initrd/mnt"
 POOL="http://deb.debian.org/debian/pool/main/b/busybox"
 BB_DEB="$(wget -qO- "$POOL/" | grep -oE 'busybox-static_[0-9][^"<]*_arm64\.deb' | sort -V | tail -1)"
@@ -212,6 +215,7 @@ chmod 755 "$WORK/initrd/init"
 mkimage -A arm64 -O linux -T ramdisk -C gzip -n uInitrd -d "$WORK/initrd.img.gz" "$WORK/uInitrd" > /dev/null
 [[ -f "$WORK/uInitrd" ]] || { echo "uInitrd 生成失败"; exit 1; }
 echo "uInitrd 生成成功: $(ls -l "$WORK/uInitrd" | awk '{print $5}') bytes"
+fi
 
 step "5/7 创建目标镜像 (GPT: ${SKIP_MB}M 间隙 + ${BOOT_MB}M boot + ${ROOT_MB}M root)"
 IMG="panther-x2-${KVER}.img"
@@ -239,7 +243,13 @@ DTB="${SCRIPT_DIR}/dtb/rk3566-panther-x2.dtb"
 [[ -f "$DTB" ]] || { echo "缺少 ${DTB} — 请确认仓库已提交 dtb/rk3566-panther-x2.dtb"; exit 1; }
 mkdir -p "$BOOT_MNT/dtb/rockchip"
 cp "$DTB" "$BOOT_MNT/dtb/rockchip/"
-cp "$WORK/uInitrd" "$BOOT_MNT/uInitrd"
+if [[ -f "kernelpkg/boot/uInitrd-${KVER}" ]]; then
+    cp "kernelpkg/boot/uInitrd-${KVER}" "$BOOT_MNT/uInitrd"
+    echo "使用内核 deb 自带的 uInitrd"
+else
+    cp "$WORK/uInitrd" "$BOOT_MNT/uInitrd"
+    echo "使用 rebuild 现场生成的 uInitrd"
+fi
 
 cat > "$BOOT_MNT/bootEnv.txt" << EOF
 verbosity=1
@@ -323,6 +333,31 @@ sync
 umount "$ROOT_MNT"; umount "$BOOT_MNT"
 losetup -d "$LOOP"; LOOP=""
 rm -f "$IMG.gz"
+step "7b/7 镜像自检 (debugfs, 不挂载)"
+# 把两个分区抽出来用 debugfs 校验关键文件, 板上点不亮时先看这里的 PASS/FAIL
+PASS=0; FAIL=0
+chk() {
+    if [[ "$2" -eq 1 ]]; then echo "  [ OK ] $1"; PASS=$((PASS+1))
+    else echo "  [FAIL] $1"; FAIL=$((FAIL+1)); fi
+}
+dd if="$IMG" of="$WORK/p1.img" bs=1M skip=$SKIP_MB count=$BOOT_MB status=none
+dd if="$IMG" of="$WORK/p2.img" bs=1M skip=$((SKIP_MB + BOOT_MB)) count=$ROOT_MB status=none
+for f in Image boot.scr bootEnv.txt uInitrd dtb/rockchip/rk3566-panther-x2.dtb; do
+    debugfs -R "stat /$f" "$WORK/p1.img" >/dev/null 2>&1 && r=1 || r=0
+    chk "p1:/$f" $r
+done
+debugfs -R "stat /sbin/init" "$WORK/p2.img" >/dev/null 2>&1 && r=1 || r=0
+chk "p2:/sbin/init (init 系统存在)" $r
+debugfs -R "ls /lib/modules" "$WORK/p2.img" 2>/dev/null | grep -q "$KVER" && r=1 || r=0
+chk "p2:/lib/modules/$KVER" $r
+debugfs -R "cat /etc/fstab" "$WORK/p2.img" 2>/dev/null | grep -q "$ROOT_UUID" && r=1 || r=0
+chk "p2:/etc/fstab 含 ROOT_UUID" $r
+debugfs -R "stat /lib/firmware/brcm/brcmfmac43430-sdio.bin" "$WORK/p2.img" >/dev/null 2>&1 && r=1 || r=0
+chk "p2:/lib/firmware/brcm (WiFi 固件)" $r
+echo "自检结果: PASS=$PASS FAIL=$FAIL"
+[[ $FAIL -eq 0 ]] || echo "!! 存在 FAIL 项, 镜像大概率无法启动 — 优先解决 FAIL 再烧写"
+rm -f "$WORK/p1.img" "$WORK/p2.img"
+
 xz -9 -T0 -f "$IMG"
 cp "$IMG.xz" "$OUT/" 2>/dev/null || mv "$IMG.xz" "$OUT/"
 # 产物交还给调用用户(sudo 场景下避免 root 属主导致后续 mv 失败)
