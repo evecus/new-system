@@ -15,8 +15,10 @@ jobs:
   build:
     runs-on: ubuntu-24.04-arm # 免费 arm64 原生 runner,比 x86 交叉编译快
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          ref: kernel
+          fetch-depth: 0
 
       - name: Download stable kernel source (7.1.13)
         run: |
@@ -177,18 +179,10 @@ jobs:
           echo "PKG_TAR=${PKG}.tar.gz"  >> $GITHUB_ENV
           echo "PKG_DEB=${DEB}.deb"     >> $GITHUB_ENV
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: kernel-package
-          path: |
-            ${{ env.PKG_TAR }}
-            ${{ env.PKG_DEB }}
-
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             ${{ env.PKG_TAR }}
             ${{ env.PKG_DEB }}
-          tag_name: kernel-panther-x2
+          tag_name: kernel
