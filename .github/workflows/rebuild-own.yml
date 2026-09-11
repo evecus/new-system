@@ -1,4 +1,4 @@
-name: rebuild (own kernel)
+name: rebuild
 
 on:
   repository_dispatch:
@@ -59,15 +59,10 @@ jobs:
           sudo chown -R $(id -u):$(id -g) release
           echo "IMG=$(ls release/*.img.xz)" >> $GITHUB_ENV
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: panther-x2-image
-          path: release/*
-
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
           files: release/*
-          tag_name: image-${{ github.run_number }}
-          generate_release_notes: true
+          name: panther-x2 firmware
+          tag_name: firmware
+          generate_release_notes: false
