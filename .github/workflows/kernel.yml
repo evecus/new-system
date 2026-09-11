@@ -184,3 +184,4 @@ jobs:
             ${{ env.PKG_TAR }}
             ${{ env.PKG_DEB }}
           tag_name: kernel
+          prerelease: true
