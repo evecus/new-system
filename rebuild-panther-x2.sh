@@ -163,7 +163,11 @@ BB_DEB="$(wget -qO- "$POOL/" | grep -oE 'busybox-static_[0-9][^"<]*_arm64\.deb' 
 echo "busybox 包: $BB_DEB"
 wget -q -O busybox.deb "$POOL/$BB_DEB"
 dpkg-deb -x busybox.deb "$WORK/initrd"
-[[ -f "$WORK/initrd/bin/busybox" ]] || { echo "busybox 解包失败"; exit 1; }
+# Debian 13(usr-merge) 装在 /usr/bin/busybox, 老版本在 /bin/busybox — 统一归位到 /bin/busybox
+BB_BIN="$(find "$WORK/initrd" -type f -name busybox | head -1)"
+[[ -n "$BB_BIN" ]] || { echo "busybox 解包失败(deb 里找不到 busybox 可执行文件)"; exit 1; }
+mkdir -p "$WORK/initrd/bin"
+[[ "$BB_BIN" = "$WORK/initrd/bin/busybox" ]] || cp "$BB_BIN" "$WORK/initrd/bin/busybox"
 
 cat > "$WORK/initrd/init" << 'INIT_EOF'
 #!/bin/busybox sh
