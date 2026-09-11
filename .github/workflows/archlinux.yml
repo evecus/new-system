@@ -375,7 +375,7 @@ jobs:
           # ── enable 基础系统服务（平台脚本/服务由 rebuild 阶段统一注入）──
           sudo chroot "${ROOTFS_DIR}" /bin/bash -c "
             systemctl enable sshd
-            systemctl enable systemd-networkd.service
+            systemctl enable NetworkManager
             systemctl enable systemd-timesyncd
             systemctl enable nftables               2>/dev/null || true
 
