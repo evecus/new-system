@@ -22,7 +22,7 @@ jobs:
 
       - name: Download stable kernel source (7.1.13)
         run: |
-          KVER=7.1.13
+          KVER=7.2.4
           # 仓库只放 overlay(自定义 dts/fragment/固件),内核源每次从 kernel.org 拉取
           # 不用 torvalds tag: 发布点与 stable 7.1.y 有 API 重构差异, stable tarball 才是可编译源
           wget -q "https://cdn.kernel.org/pub/linux/kernel/v7.x/linux-${KVER}.tar.xz"
