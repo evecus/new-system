@@ -216,6 +216,7 @@ jobs:
           sudo chroot "${ROOTFS_DIR}" systemctl enable nftables         2>/dev/null || true
           # ── disable 不需要的服务 ──────────────────────────────────────
           sudo chroot "${ROOTFS_DIR}" systemctl disable networking.service                2>/dev/null || true
+          sudo chroot "${ROOTFS_DIR}" systemctl disable systemd-networkd                  2>/dev/null || true
           sudo chroot "${ROOTFS_DIR}" systemctl disable NetworkManager-wait-online.service 2>/dev/null || true
           sudo chroot "${ROOTFS_DIR}" systemctl disable e2scrub_reap.service              2>/dev/null || true
           sudo chroot "${ROOTFS_DIR}" systemctl disable systemd-pstore.service            2>/dev/null || true
