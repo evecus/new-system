@@ -1,4 +1,4 @@
-name: Build Kernel
+name: Build Panther X2 Kernel
 
 on:
   workflow_dispatch: # 手动触发
@@ -15,14 +15,12 @@ jobs:
   build:
     runs-on: ubuntu-24.04-arm # 免费 arm64 原生 runner,比 x86 交叉编译快
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: kernel
-          fetch-depth: 0
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Download stable kernel source (7.1.13)
         run: |
-          KVER=7.2.4
+          KVER=7.1.13
           # 仓库只放 overlay(自定义 dts/fragment/固件),内核源每次从 kernel.org 拉取
           # 不用 torvalds tag: 发布点与 stable 7.1.y 有 API 重构差异, stable tarball 才是可编译源
           wget -q "https://cdn.kernel.org/pub/linux/kernel/v7.x/linux-${KVER}.tar.xz"
@@ -149,10 +147,10 @@ jobs:
           rm -f "${DEB}/lib/modules/${KVER}/build" "${DEB}/lib/modules/${KVER}/source"
 
           cat > "${DEB}/DEBIAN/control" << EOF
-          Package: linux-image-panther-x2
+          Package: linux-image-${KVER}
           Version: ${KVER}
           Architecture: arm64
-          Maintainer: evecus <evecus@users.noreply.github.com>
+          Maintainer: 163jm <163jm@users.noreply.github.com>
           Depends:
           Provides: linux-image
           Section: kernel
@@ -175,9 +173,17 @@ jobs:
           EOF
           chmod 755 "${DEB}/DEBIAN/postinst"
 
-          dpkg-deb --root-owner-group --build "${DEB}" "${DEB}.deb"
+          dpkg-deb --root-owner-group --build "${DEB}" "${PKG}.deb"
           echo "PKG_TAR=${PKG}.tar.gz"  >> $GITHUB_ENV
-          echo "PKG_DEB=${DEB}.deb"     >> $GITHUB_ENV
+          echo "PKG_DEB=${PKG}.deb"     >> $GITHUB_ENV
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-package
+          path: |
+            ${{ env.PKG_TAR }}
+            ${{ env.PKG_DEB }}
 
       - name: Release
         uses: softprops/action-gh-release@v2
@@ -185,4 +191,4 @@ jobs:
           files: |
             ${{ env.PKG_TAR }}
             ${{ env.PKG_DEB }}
-          tag_name: kernel
+          tag_name: kernel-panther-x2
