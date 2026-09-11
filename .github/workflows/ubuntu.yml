@@ -275,6 +275,7 @@ jobs:
           # ── Ubuntu 特有：禁用 snapd / unattended-upgrades ────────────
           sudo chroot "${ROOTFS_DIR}" bash -c "
             systemctl disable snapd.service snapd.socket snapd.seeded.service 2>/dev/null || true
+            systemctl disable systemd-networkd 2>/dev/null || true
             apt-mark hold snapd 2>/dev/null || true
             systemctl disable unattended-upgrades.service 2>/dev/null || true
             systemctl disable apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
