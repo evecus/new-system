@@ -25,11 +25,13 @@ SSH_PUBKEY="${SSH_PUBKEY:-}"
 OUT="${OUT:-out}"
 SKIP_MB=16
 BOOT_MB=512
+# 脚本所在目录(仓库根) — 必须在任何 cd 之前确定
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 step() { echo -e "\n[STEPS] $1"; }
 have() { command -v "$1" >/dev/null 2>&1; }
 [[ $(id -u) -eq 0 ]] || { echo "需要 root"; exit 1; }
-have python3 || { echo "需要 python3"; exit 1; }
+have openssl || { echo "需要 openssl"; exit 1; }
 
 WORK="$(mktemp -d /tmp/p2build.XXXXXX)"
 mkdir -p "$OUT"
@@ -71,8 +73,8 @@ RS="$WORK/rootfs"
 cp -a "$SRC_MNT/." "$RS/"
 umount "$SRC_MNT"; losetup -d "$SRC_LOOP"; SRC_MNT=""
 
-# root 密码 (直接改 /etc/shadow, 无需 chroot)
-HASH="$(python3 -c "import crypt;print(crypt.crypt('${ROOT_PASS}', crypt.mksalt(crypt.METHOD_SHA512)))")"
+# root 密码 (直接改 /etc/shadow, 无需 chroot; openssl 生成 SHA512-crypt)
+HASH="$(openssl passwd -6 "$ROOT_PASS")"
 python3 - "$RS/etc/shadow" "$HASH" << 'PYEOF'
 import sys
 path, h = sys.argv[1], sys.argv[2]
@@ -108,8 +110,7 @@ done
 rm -f "$RS/etc/resolv.conf"; echo "nameserver 223.5.5.5" > "$RS/etc/resolv.conf"
 
 # panther 运行时机制 (扩容/IRQ 调度/调频/swap/emmc 安装) — 来自 rootfs-overlay
-REPO="$(cd "$(dirname "$0")" && pwd)"
-OVERLAY="$REPO/rootfs-overlay"
+OVERLAY="${SCRIPT_DIR}/rootfs-overlay"
 if [[ -d "$OVERLAY" ]]; then
     cp -a "$OVERLAY/." "$RS/"
     chmod 755 "$RS/usr/sbin"/panther-*.sh "$RS/usr/sbin"/install-to-emmc
@@ -128,15 +129,28 @@ cp -a kernelpkg/lib/modules/${KVER} "$RS/lib/modules/"
 rm -f "$RS/lib/modules/${KVER}/build" "$RS/lib/modules/${KVER}/source"
 depmod -a -b "$RS" "${KVER}" 2>/dev/null || depmod -a "${KVER}" 2>/dev/null || true
 
-# WiFi/BT 固件 (可选 FIRMWARE_URL: 一个 tar.gz, 解开后含 brcm/ 目录)
-if [[ -n "$FIRMWARE_URL" ]]; then
+# WiFi/BT 固件: 优先仓库本地 firmware/brcm/, 其次 FIRMWARE_URL
+mkdir -p "$RS/lib/firmware/brcm"
+if [[ -d "${SCRIPT_DIR}/firmware/brcm" ]]; then
+    cp -a "${SCRIPT_DIR}/firmware/brcm/." "$RS/lib/firmware/brcm/"
+    echo "已从仓库 firmware/brcm 安装固件"
+elif [[ -n "$FIRMWARE_URL" ]]; then
     wget -q --show-progress -O firmware.tar.gz "$FIRMWARE_URL"
     mkdir -p "$RS/lib/firmware"
     tar -xzf firmware.tar.gz -C "$RS/lib/firmware/"
-    echo "已安装固件"
+    echo "已从 FIRMWARE_URL 安装固件"
 fi
 ls "$RS/lib/firmware/brcm/brcmfmac43430-sdio.bin" >/dev/null 2>&1 \
-    || echo "!! 警告: 无 brcmfmac43430 固件, WiFi 将不可用 (可加 FIRMWARE_URL 重跑)"
+    || echo "!! 警告: 无 brcmfmac43430 固件, WiFi 将不可用"
+ls "$RS/lib/firmware/brcm/brcmfmac43430-sdio.txt" >/dev/null 2>&1 \
+    || echo "!! 警告: 无 nvram(.txt), WiFi 即使有 bin 也大概率起不来"
+
+# rootfs 体积守卫: 防止 ROOT_MB 给小了导致拷贝中途爆盘
+USED_MB=$(du -sm "$RS" | awk '{print $1}')
+if [[ "$USED_MB" -gt $((ROOT_MB - 200)) ]]; then
+    echo "!! rootfs 实际占用 ${USED_MB}MiB, 接近/超过 root 分区 ${ROOT_MB}MiB"
+    echo "!! 请把 root_mb 调大 (建议 $((USED_MB + 800)) 以上), 本次继续但可能失败"
+fi
 
 step "5/7 创建目标镜像 (GPT: ${SKIP_MB}M 间隙 + ${BOOT_MB}M boot + ${ROOT_MB}M root)"
 IMG="panther-x2-${KVER}.img"
@@ -160,8 +174,9 @@ BOOT_UUID="$(lsblk -no UUID "${LOOP}p1" | head -1)"
 ROOT_UUID="$(lsblk -no UUID "${LOOP}p2" | head -1)"
 cp "$VMLINUZ" "$BOOT_MNT/Image"
 mkdir -p "$BOOT_MNT/dtb/rockchip" "$BOOT_MNT/extlinux"
-REPO="$(cd "$(dirname "$0")" && pwd)"
-cp "$REPO/dtb/rk3566-panther-x2.dtb" "$BOOT_MNT/dtb/rockchip/"
+DTB="${SCRIPT_DIR}/dtb/rk3566-panther-x2.dtb"
+[[ -f "$DTB" ]] || { echo "缺少 ${DTB} — 请确认仓库已提交 dtb/rk3566-panther-x2.dtb"; exit 1; }
+cp "$DTB" "$BOOT_MNT/dtb/rockchip/"
 cat > "$BOOT_MNT/extlinux/extlinux.conf" << EOF
 label panther-x2
     linux /Image
@@ -178,8 +193,8 @@ sync
 
 step "7/7 写入 u-boot 并压缩"
 # rockchip 布局: idbloader → 扇区 64 (32KiB), u-boot.itb → 扇区 16384 (8MiB)
-dd if="$REPO/u-boot/idbloader.img" of="$LOOP" conv=fsync,notrunc bs=512 seek=64   status=none
-dd if="$REPO/u-boot/u-boot.itb"    of="$LOOP" conv=fsync,notrunc bs=512 seek=16384 status=none
+dd if="${SCRIPT_DIR}/u-boot/idbloader.img" of="$LOOP" conv=fsync,notrunc bs=512 seek=64   status=none
+dd if="${SCRIPT_DIR}/u-boot/u-boot.itb"    of="$LOOP" conv=fsync,notrunc bs=512 seek=16384 status=none
 sync
 umount "$ROOT_MNT"; umount "$BOOT_MNT"
 losetup -d "$LOOP"; LOOP=""
