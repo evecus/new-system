@@ -1,4 +1,4 @@
-name: rebuild (own kernel)
+name: rebuild
 
 on:
   repository_dispatch:
