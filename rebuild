@@ -67,6 +67,11 @@ mkdir -p "$SRC_MNT"
 if [[ -e "${SRC_LOOP}p2" ]]; then mount "${SRC_LOOP}p2" "$SRC_MNT"; else mount "${SRC_LOOP}p1" "$SRC_MNT"; fi
 [[ -d "$SRC_MNT/etc" ]] || { echo "rootfs 镜像内容异常(未找到 /etc)"; exit 1; }
 echo "rootfs 底座: $(cat "$SRC_MNT/etc/os-release" | grep PRETTY_NAME | cut -d'"' -f2)"
+# 发行版信息(用于产物命名与 build-info)
+OS_ID=$(grep -oE '^ID=.*' "$SRC_MNT/etc/os-release" | cut -d= -f2 | tr -d '"' | head -1)
+OS_CODENAME=$(grep -oE '^VERSION_CODENAME=.*' "$SRC_MNT/etc/os-release" | cut -d= -f2 | tr -d '"' | head -1)
+OS_ID=${OS_ID:-unknown}; OS_CODENAME=${OS_CODENAME:-unknown}
+echo "OS: ${OS_ID} / ${OS_CODENAME}"
 
 step "4/7 定制 rootfs (root 密码 / SSH / 网络 / 模块 / 固件)"
 RS="$WORK/rootfs"
@@ -223,7 +228,7 @@ echo "uInitrd 生成成功: $(ls -l "$WORK/uInitrd" | awk '{print $5}') bytes"
 fi
 
 step "5/7 创建目标镜像 (GPT: ${SKIP_MB}M 间隙 + ${BOOT_MB}M boot + ${ROOT_MB}M root)"
-IMG="panther-x2-${KVER}.img"
+IMG="panther-x2-${OS_ID}-${OS_CODENAME}-${KVER}.img"
 rm -f "$IMG"
 truncate -s $((SKIP_MB + BOOT_MB + ROOT_MB))M "$IMG"
 parted -s "$IMG" mklabel gpt
@@ -365,11 +370,20 @@ rm -f "$WORK/p1.img" "$WORK/p2.img"
 
 xz -9 -T0 -f "$IMG"
 cp "$IMG.xz" "$OUT/" 2>/dev/null || mv "$IMG.xz" "$OUT/"
+cat > "$OUT/build-info.txt" << EOF
+board       : panther-x2
+kernel      : ${KVER}
+os          : ${OS_ID} ${OS_CODENAME}
+rootfs_url  : ${ROOTFS_URL}
+kernel_deb  : ${KERNEL_DEB_URL}
+firmware    : ${FIRMWARE_URL:-none}
+build_date  : $(date -u '+%Y-%m-%d %H:%M UTC')
+EOF
 # 产物交还给调用用户(sudo 场景下避免 root 属主导致后续 mv 失败)
 if [[ -n "${SUDO_USER:-}" ]]; then
     chown -R "${SUDO_USER}" "$OUT" 2>/dev/null || true
 fi
 echo ""
-echo "完成: ${OUT}/panther-x2-${KVER}.img.xz"
-echo "烧写: xzcat panther-x2-${KVER}.img.xz | dd of=/dev/sdX bs=4M conv=fsync  (或 balenaEtcher)"
+echo "完成: ${OUT}/panther-x2-${OS_ID}-${OS_CODENAME}-${KVER}.img.xz"
+echo "烧写: xzcat panther-x2-${OS_ID}-${OS_CODENAME}-${KVER}.img.xz | dd of=/dev/sdX bs=4M conv=fsync  (或 balenaEtcher)"
 echo "登录: root / ${ROOT_PASS} (串口 ttyS2@1500000 或 SSH, 首次登录后请修改)"
