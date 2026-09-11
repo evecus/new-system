@@ -1,4 +1,4 @@
-name: rebuild
+name: rebuild (own kernel)
 
 on:
   repository_dispatch:
@@ -56,6 +56,7 @@ jobs:
           # 脚本以 sudo 运行, 产物属 root, 这里用 sudo 归位并交还给 runner 用户
           sudo mkdir -p release
           sudo mv out/*.img.xz release/
+          sudo cp out/build-info.txt release/ 2>/dev/null || true
           sudo chown -R $(id -u):$(id -g) release
           echo "IMG=$(ls release/*.img.xz)" >> $GITHUB_ENV
 
@@ -63,6 +64,4 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: release/*
-          name: panther-x2 firmware
           tag_name: firmware
-          generate_release_notes: false
