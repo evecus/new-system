@@ -85,7 +85,7 @@ jobs:
 
       - name: Generate initrd.img / uInitrd (ophub 式, 复刻 generate_uinitrd)
         run: |
-          KVER=$(make -C linux ARCH=arm64 kernelrelease LOCALVERSION=)
+          KVER=$(cd linux && make ARCH=arm64 kernelrelease LOCALVERSION=)
           # 1) 新内核文件进系统 /boot (ophub: copy kernel files into armbian system)
           sudo mkdir -p /boot
           sudo cp linux/System.map "/boot/System.map-${KVER}"
@@ -120,7 +120,7 @@ jobs:
 
       - name: Package (tar.gz + deb)
         run: |
-          KVER=$(make -C linux ARCH=arm64 kernelrelease LOCALVERSION=)
+          KVER=$(cd linux && make ARCH=arm64 kernelrelease LOCALVERSION=)
           PKG="panther-x2-kernel-${KVER}"
 
           # --- 原有 tar.gz ---
@@ -179,10 +179,18 @@ jobs:
           echo "PKG_TAR=${PKG}.tar.gz"  >> $GITHUB_ENV
           echo "PKG_DEB=${DEB}.deb"     >> $GITHUB_ENV
 
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-package
+          path: |
+            ${{ env.PKG_TAR }}
+            ${{ env.PKG_DEB }}
+
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             ${{ env.PKG_TAR }}
             ${{ env.PKG_DEB }}
-          tag_name: kernel
+          tag_name: kernel-panther-x2
