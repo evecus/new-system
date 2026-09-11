@@ -24,7 +24,7 @@ ROOT_PASS="${ROOT_PASS:-1234}"
 SSH_PUBKEY="${SSH_PUBKEY:-}"
 OUT="${OUT:-out}"
 SKIP_MB=16
-BOOT_MB=512
+BOOT_MB=256
 # 脚本所在目录(仓库根) — 必须在任何 cd 之前确定
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -46,7 +46,7 @@ trap CLEANUP EXIT
 step "1/7 安装依赖"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq dosfstools e2fsprogs parted wget gzip kmod xz-utils > /dev/null
+apt-get install -y -qq dosfstools e2fsprogs parted wget gzip kmod xz-utils u-boot-tools > /dev/null
 
 step "2/7 下载并解包内核 deb"
 cd "$WORK"
@@ -169,20 +169,58 @@ mkdir -p "$BOOT_MNT" "$ROOT_MNT"
 mount "${LOOP}p1" "$BOOT_MNT"
 mount "${LOOP}p2" "$ROOT_MNT"
 
-# bootfs: extlinux 引导 (u-boot distro_boot 原生扫描)
+# bootfs: 这块板的 u-boot 只认 Armbian 流程(boot.scr + bootEnv.txt), 不扫 extlinux
+# 无 initramfs: booti kernel - fdt (内核全内建, root=UUID 由 rootwait 等待)
 BOOT_UUID="$(lsblk -no UUID "${LOOP}p1" | head -1)"
 ROOT_UUID="$(lsblk -no UUID "${LOOP}p2" | head -1)"
 cp "$VMLINUZ" "$BOOT_MNT/Image"
-mkdir -p "$BOOT_MNT/dtb/rockchip" "$BOOT_MNT/extlinux"
 DTB="${SCRIPT_DIR}/dtb/rk3566-panther-x2.dtb"
 [[ -f "$DTB" ]] || { echo "缺少 ${DTB} — 请确认仓库已提交 dtb/rk3566-panther-x2.dtb"; exit 1; }
+mkdir -p "$BOOT_MNT/dtb/rockchip"
 cp "$DTB" "$BOOT_MNT/dtb/rockchip/"
-cat > "$BOOT_MNT/extlinux/extlinux.conf" << EOF
-label panther-x2
-    linux /Image
-    fdt /dtb/rockchip/rk3566-panther-x2.dtb
-    append root=UUID=${ROOT_UUID} rootfstype=ext4 rootwait rw console=ttyS2,1500000 console=tty0 net.ifnames=0
+
+cat > "$BOOT_MNT/bootEnv.txt" << EOF
+verbosity=7
+console=both
+consoleargs=console=ttyS2,1500000 console=tty0
+fdtfile=rockchip/rk3566-panther-x2.dtb
+rootdev=UUID=${ROOT_UUID}
+rootfstype=ext4
+rootflags=rw,errors=remount-ro
+extraargs=rw rootwait
+extraboardargs=net.ifnames=0
+overlay_prefix=rk3568
+overlays=
 EOF
+
+cat > "$BOOT_MNT/boot.cmd" << 'EOF'
+setenv load_addr "0x9000000"
+setenv rootdev "/dev/mmcblk0p2"
+setenv verbosity "1"
+setenv console "both"
+setenv rootfstype "ext4"
+setenv rootflags "rw,errors=remount-ro"
+setenv earlycon "off"
+
+echo "Boot script loaded from ${devtype} ${devnum}"
+if test -e ${devtype} ${devnum} ${prefix}bootEnv.txt; then
+	load ${devtype} ${devnum} ${load_addr} ${prefix}bootEnv.txt
+	env import -t ${load_addr} ${filesize}
+fi
+
+if test "${console}" = "serial" || test "${console}" = "both"; then setenv consoleargs "console=ttyS2,1500000 ${consoleargs}"; fi
+if test "${console}" = "display" || test "${console}" = "both"; then setenv consoleargs "console=tty0 ${consoleargs}"; fi
+if test "${earlycon}" = "on"; then setenv consoleargs "earlycon ${consoleargs}"; fi
+
+setenv bootargs "root=${rootdev} rootwait rootfstype=${rootfstype} rootflags=${rootflags} ${consoleargs} consoleblank=0 loglevel=${verbosity} ${extraargs} ${extraboardargs}"
+
+load ${devtype} ${devnum} ${kernel_addr_r} ${prefix}Image
+load ${devtype} ${devnum} ${fdt_addr_r} ${prefix}dtb/${fdtfile}
+fdt addr ${fdt_addr_r}
+# 无 initramfs: 内核全内建, ramdisk 参数为 "-"
+booti ${kernel_addr_r} - ${fdt_addr_r}
+EOF
+mkimage -C none -A arm64 -T script -d "$BOOT_MNT/boot.cmd" "$BOOT_MNT/boot.scr" > /dev/null
 
 # rootfs: 回填 fstab, 清理构建残留
 echo "UUID=${ROOT_UUID} / ext4 defaults,noatime 0 1" > "$RS/etc/fstab"
