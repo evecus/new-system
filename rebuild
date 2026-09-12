@@ -255,7 +255,6 @@ mount "${LOOP}p2" "$ROOT_MNT"
 BOOT_UUID="$(lsblk -no UUID "${LOOP}p1" | head -1)"
 ROOT_UUID="$(lsblk -no UUID "${LOOP}p2" | head -1)"
 cp "$VMLINUZ" "$BOOT_MNT/Image"
-[[ -f "kernelpkg/boot/initrd.img-${KVER}" ]] && cp "kernelpkg/boot/initrd.img-${KVER}" "$BOOT_MNT/initrd.img-${KVER}"
 DTB="${SCRIPT_DIR}/dtb/rk3566-panther-x2.dtb"
 [[ -f "$DTB" ]] || { echo "缺少 ${DTB} — 请确认仓库已提交 dtb/rk3566-panther-x2.dtb"; exit 1; }
 mkdir -p "$BOOT_MNT/dtb/rockchip"
