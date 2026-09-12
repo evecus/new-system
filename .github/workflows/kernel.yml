@@ -27,9 +27,6 @@ jobs:
           tar -xf "linux-${KVER}.tar.xz"
           mv "linux-${KVER}" linux
 
-     # - name: Overlay panther-x2-kernel files into kernel tree
-     #   run: |
-      #    rsync -a arch/ linux/arch/
 
       - name: Install dependencies
         run: |
