@@ -125,8 +125,8 @@ jobs:
           # --- 原有 tar.gz ---
           mkdir -p "${PKG}/dtb" "${PKG}/modules"
           cp linux/arch/arm64/boot/Image "${PKG}/"
-          find linux/arch/arm64/boot/dts -name "rk3566-panther-x2.dtb" \
-            -exec cp {} "${PKG}/dtb/" \;
+          #find linux/arch/arm64/boot/dts -name "rk3566-panther-x2.dtb" \
+          #  -exec cp {} "${PKG}/dtb/" \;
           cp -r linux/modules-out/lib/modules/"${KVER}"* "${PKG}/modules/" || true
           cp boot-extra/initrd.img-${KVER} "${PKG}/" 2>/dev/null || true
           cp boot-extra/uInitrd-${KVER} "${PKG}/" 2>/dev/null || true
