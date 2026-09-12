@@ -139,7 +139,8 @@ jobs:
                    "${DEB}/lib/modules/${KVER}" \
                    "${DEB}/usr/share/doc/${DEB}"
           cp linux/arch/arm64/boot/Image       "${DEB}/boot/Image"
-          cp linux/.config                     "${DEB}/boot/config"
+          cp linux/.config                     "${DEB}/boot/kernel-config"
+          cp boot-extra/initrd.img-${KVER} "${DEB}/boot/initrd.img"
           cp boot-extra/uInitrd-${KVER}    "${DEB}/boot/uInitrd"
           cp -r linux/modules-out/lib/modules/"${KVER}"* "${DEB}/lib/modules/${KVER}/" || true
           rm -f "${DEB}/lib/modules/${KVER}/build" "${DEB}/lib/modules/${KVER}/source"
