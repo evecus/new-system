@@ -77,9 +77,7 @@ jobs:
       - name: Build Image / dtb / modules
         working-directory: linux
         run: |
-          make ARCH=arm64 LOCALVERSION= -j$(nproc) Image dtbs
-          make ARCH=arm64 LOCALVERSION= -j$(nproc) modules
-          make ARCH=arm64 LOCALVERSION= INSTALL_MOD_PATH=./modules-out modules_install
+          make ARCH=arm64 LOCALVERSION= -j$(nproc) Image
 
       - name: Generate initrd.img / uInitrd (ophub 式, 复刻 generate_uinitrd)
         run: |
@@ -90,12 +88,7 @@ jobs:
           sudo cp linux/.config "/boot/config-${KVER}"
           sudo cp linux/arch/arm64/boot/Image "/boot/vmlinuz-${KVER}"
           sudo cp linux/arch/arm64/boot/Image "/boot/Image"
-          # 2) modules 进系统 /usr/lib/modules (initramfs-tools 依赖)
-          sudo mkdir -p "/usr/lib/modules/${KVER}"
-          sudo cp -r linux/modules-out/lib/modules/"${KVER}"/. "/usr/lib/modules/${KVER}/"
-          sudo rm -f "/usr/lib/modules/${KVER}/build" "/usr/lib/modules/${KVER}/source"
-          sudo depmod -a "${KVER}" 2>/dev/null || true
-          # 3) COMPRESS=gzip + 99-uboot 钩子 (mkimage -> uInitrd), 与 ophub common-files 相同
+          # 2) COMPRESS=gzip + 99-uboot 钩子 (mkimage -> uInitrd), 与 ophub common-files 相同
           sudo sed -i "s|^COMPRESS=.*|COMPRESS=gzip|g" /etc/initramfs-tools/initramfs.conf
           sudo mkdir -p /etc/initramfs/post-update.d
           sudo tee /etc/initramfs/post-update.d/99-uboot > /dev/null << 'EOF'
@@ -124,9 +117,6 @@ jobs:
           # --- 原有 tar.gz ---
           mkdir -p "${PKG}/dtb" "${PKG}/modules"
           cp linux/arch/arm64/boot/Image "${PKG}/"
-          #find linux/arch/arm64/boot/dts -name "rk3566-panther-x2.dtb" \
-          #  -exec cp {} "${PKG}/dtb/" \;
-          cp -r linux/modules-out/lib/modules/"${KVER}"* "${PKG}/modules/" || true
           cp boot-extra/initrd.img-${KVER} "${PKG}/" 2>/dev/null || true
           cp boot-extra/uInitrd-${KVER} "${PKG}/" 2>/dev/null || true
           cp linux/.config "${PKG}/kernel.config"
@@ -136,15 +126,11 @@ jobs:
           DEB="linux-image-panther-x2"
           mkdir -p "${DEB}/DEBIAN" \
                    "${DEB}/boot" \
-                   "${DEB}/lib/modules/${KVER}" \
                    "${DEB}/usr/share/doc/${DEB}"
           cp linux/arch/arm64/boot/Image       "${DEB}/boot/Image"
           cp linux/.config                     "${DEB}/boot/kernel-config"
           cp boot-extra/initrd.img-${KVER} "${DEB}/boot/initrd.img"
           cp boot-extra/uInitrd-${KVER}    "${DEB}/boot/uInitrd"
-          cp -r linux/modules-out/lib/modules/"${KVER}"* "${DEB}/lib/modules/${KVER}/" || true
-          rm -f "${DEB}/lib/modules/${KVER}/build" "${DEB}/lib/modules/${KVER}/source"
-
           cat > "${DEB}/DEBIAN/control" << EOF
           Package: linux-image-panther-x2
           Version: ${KVER}
