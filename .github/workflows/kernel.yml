@@ -112,7 +112,6 @@ jobs:
           PKG="panther-x2-kernel-${KVER}"
 
           # --- 原有 tar.gz ---
-          mkdir -p "${PKG}/dtb" "${PKG}/modules"
           cp linux/arch/arm64/boot/Image "${PKG}/"
           cp boot-extra/initrd.img-${KVER} "${PKG}/" 2>/dev/null || true
           cp boot-extra/uInitrd-${KVER} "${PKG}/" 2>/dev/null || true
