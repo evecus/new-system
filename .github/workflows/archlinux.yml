@@ -284,7 +284,7 @@ jobs:
             set -e
             pacman -Sy --noconfirm --needed \
               openssh sudo curl wget ca-certificates tzdata \
-              iproute2 \
+              iproute2 binutils \
               net-tools iputils bind \
               wireless_tools wpa_supplicant wireless-regdb \
               bash-completion htop nano nftables bc \
