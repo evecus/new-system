@@ -63,5 +63,5 @@ jobs:
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
-          files: release/*.img.gz
+          files: release/*.img.xz
           tag_name: firmware
