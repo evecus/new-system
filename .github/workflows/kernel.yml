@@ -26,7 +26,6 @@ jobs:
           wget -q "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-${KVER}.tar.xz"
           tar -xf "linux-${KVER}.tar.xz"
           mv "linux-${KVER}" linux
-          rm -rf arch
 
      # - name: Overlay panther-x2-kernel files into kernel tree
      #   run: |
