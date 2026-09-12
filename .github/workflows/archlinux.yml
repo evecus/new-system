@@ -288,7 +288,7 @@ jobs:
               net-tools iputils bind \
               wireless_tools wpa_supplicant wireless-regdb \
               bash-completion htop nano nftables bc \
-              uboot-tools parted network-manager \
+              uboot-tools parted networkmanager \
               btrfs-progs e2fsprogs dosfstools \
               lsof file procps-ng cronie \
               rsync logrotate perl
