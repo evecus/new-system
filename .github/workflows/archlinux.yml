@@ -467,7 +467,7 @@ jobs:
           echo "BUILT_DATE=${BUILT_DATE}" >> "${GITHUB_OUTPUT}"
           echo "status=success"           >> "${GITHUB_OUTPUT}"
 
-      # ── 5. 将 rootfs 打包成 rebuild 脚本可直接识别的 "*.img.gz" 镜像 ──
+      # ── 5. 将 rootfs 打包成 rebuild 脚本可直接识别的 "*.img.xz" 镜像 ──
       #        产物文件名使用发行版名称 + 版本信息，不再伪装为 Armbian 镜像 ──
       - name: Package rootfs into an image
         id: wrap_image
@@ -511,24 +511,20 @@ jobs:
           sudo umount "${MNT}"
           sudo losetup -d "${LOOPDEV}"
 
-          echo "▶ 压缩镜像..."
-          if command -v pigz >/dev/null 2>&1; then
-            pigz -f "${IMG_PATH}"
-          else
-            gzip -f "${IMG_PATH}"
-          fi
+          echo "▶ 压缩镜像 (xz)..."
+          xz -T0 -9 -f "${IMG_PATH}"
 
           OUT_DIR="${GITHUB_WORKSPACE}/output"
           mkdir -p "${OUT_DIR}"
-          mv -f "${IMG_PATH}.gz" "${OUT_DIR}/"
-          IMG_GZ_NAME="${IMG_NAME}.gz"
+          mv -f "${IMG_PATH}.xz" "${OUT_DIR}/"
+          IMG_XZ_NAME="${IMG_NAME}.xz"
 
           cd "${OUT_DIR}"
-          sha256sum "${IMG_GZ_NAME}" > "${IMG_GZ_NAME}.sha256"
+          sha256sum "${IMG_XZ_NAME}" > "${IMG_XZ_NAME}.sha256"
 
-          echo "IMG_GZ_NAME=${IMG_GZ_NAME}" >> "${GITHUB_OUTPUT}"
-          echo "IMG_GZ_PATH=${OUT_DIR}/${IMG_GZ_NAME}" >> "${GITHUB_OUTPUT}"
-          echo "IMG_GZ_SHA256_PATH=${OUT_DIR}/${IMG_GZ_NAME}.sha256" >> "${GITHUB_OUTPUT}"
+          echo "IMG_XZ_NAME=${IMG_XZ_NAME}" >> "${GITHUB_OUTPUT}"
+          echo "IMG_XZ_PATH=${OUT_DIR}/${IMG_XZ_NAME}" >> "${GITHUB_OUTPUT}"
+          echo "IMG_XZ_SHA256_PATH=${OUT_DIR}/${IMG_XZ_NAME}.sha256" >> "${GITHUB_OUTPUT}"
           echo "status=success" >> "${GITHUB_OUTPUT}"
 
       # ── 6. 发布 rootfs 到 Release ────────────────────────────────────
@@ -539,6 +535,6 @@ jobs:
           tag: "rootfs"
           name: "rootfs"
           artifacts: |
-            ${{ steps.wrap_image.outputs.IMG_GZ_PATH }}
+            ${{ steps.wrap_image.outputs.IMG_XZ_PATH }}
           allowUpdates: true
           token: ${{ secrets.GITHUB_TOKEN }}
