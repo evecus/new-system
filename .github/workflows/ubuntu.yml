@@ -184,7 +184,7 @@ jobs:
               apt-get update -qq
               apt-get install -y \
                 openssh-server sudo curl wget ca-certificates \
-                locales tzdata fdisk \
+                locales tzdata fdisk binutils \
                 iproute2 network-manager netplan.io \
                 net-tools iputils-ping dnsutils \
                 wireless-tools chrony \
