@@ -54,8 +54,8 @@ wget -q --show-progress -O kernel.deb "$KERNEL_DEB_URL"
 rm -rf kernelpkg && mkdir kernelpkg
 dpkg-deb -x kernel.deb kernelpkg
 KVER="$(ls kernelpkg/lib/modules/ | head -1)"
-VMLINUZ="kernelpkg/boot/vmlinuz-${KVER}"
-[[ -f "$VMLINUZ" ]] || { echo "deb 中未找到 vmlinuz-${KVER}"; exit 1; }
+VMLINUZ="kernelpkg/boot/Image"
+[[ -f "$VMLINUZ" ]] || { echo "deb 中未找到 Image"; exit 1; }
 echo "KVER = ${KVER}"
 
 step "3/7 下载并提取 rootfs 底座"
@@ -166,8 +166,8 @@ fi
 # 方法: Debian busybox-static arm64 + 迷你 init 脚本 → cpio/gzip → mkimage
 # 等价于 ophub 在 arm64 系统里 update-initramfs + 99-uboot 钩子的产物, 但不依赖 arm64 系统
 step "4b/7 生成 uInitrd (deb 未自带时才生成)"
-if [[ -f "kernelpkg/boot/uInitrd-${KVER}" ]]; then
-    echo "内核 deb 已自带 uInitrd-${KVER}, 跳过 4b 生成"
+if [[ -f "kernelpkg/boot/uInitrd" ]]; then
+    echo "内核 deb 已自带 uInitrd, 跳过 4b 生成"
 else
 mkdir -p "$WORK/initrd/bin" "$WORK/initrd/proc" "$WORK/initrd/sys" "$WORK/initrd/dev" "$WORK/initrd/run" "$WORK/initrd/mnt"
 POOL="http://deb.debian.org/debian/pool/main/b/busybox"
@@ -253,8 +253,8 @@ DTB="${SCRIPT_DIR}/dtb/rk3566-panther-x2.dtb"
 [[ -f "$DTB" ]] || { echo "缺少 ${DTB} — 请确认仓库已提交 dtb/rk3566-panther-x2.dtb"; exit 1; }
 mkdir -p "$BOOT_MNT/dtb/rockchip"
 cp "$DTB" "$BOOT_MNT/dtb/rockchip/"
-if [[ -f "kernelpkg/boot/uInitrd-${KVER}" ]]; then
-    cp "kernelpkg/boot/uInitrd-${KVER}" "$BOOT_MNT/uInitrd"
+if [[ -f "kernelpkg/boot/uInitrd" ]]; then
+    cp "kernelpkg/boot/uInitrd" "$BOOT_MNT/uInitrd"
     echo "使用内核 deb 自带的 uInitrd"
 else
     cp "$WORK/uInitrd" "$BOOT_MNT/uInitrd"
