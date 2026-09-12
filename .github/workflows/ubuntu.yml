@@ -427,6 +427,7 @@ jobs:
         with:
           tag: "rootfs"
           name: "rootfs"
+          prerelease: true
           artifacts: |
             ${{ steps.wrap_image.outputs.IMG_XZ_PATH }}
           allowUpdates: true
