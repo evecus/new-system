@@ -1,4 +1,19 @@
 #!/bin/bash
+#================================================================================================
+# rebuild-panther-x2 — Panther-X2 专属镜像组装(完全不依赖 Armbian)
+#
+# 输入三件套:
+#   1. 我们自建内核的 .deb          (来自 163jm/kernel 的 Release, 含 vmlinuz/modules)
+#   2. rootfs 底座 .img.gz          (来自本仓库 debian.yml 等的 Release, 单分区 ext4)
+#   3. 本仓库的 u-boot/ 与 dtb/     (idbloader.img / u-boot.itb / rk3566-panther-x2.dtb)
+#
+# 流程: 下载解包 → 提取 rootfs → 定制(root 密码/SSH/网络/固件/模块) → 组装 GPT 镜像
+#       (GPT: 16MiB 引导间隙 + 512MiB boot + N MiB root) → 写入 u-boot → xz 压缩
+# 引导: u-boot distro_boot → /extlinux/extlinux.conf, 内核全内建, 无 initramfs
+#
+# 全程文件级操作, 不 chroot (x86 runner 处理 arm64 rootfs 无需 qemu)
+# 用法: sudo bash rebuild-panther-x2
+#================================================================================================
 set -euo pipefail
 
 KERNEL_DEB_URL="${KERNEL_DEB_URL:?需要 KERNEL_DEB_URL}"
@@ -240,6 +255,7 @@ mount "${LOOP}p2" "$ROOT_MNT"
 BOOT_UUID="$(lsblk -no UUID "${LOOP}p1" | head -1)"
 ROOT_UUID="$(lsblk -no UUID "${LOOP}p2" | head -1)"
 cp "$VMLINUZ" "$BOOT_MNT/Image"
+[[ -f "kernelpkg/boot/initrd.img-${KVER}" ]] && cp "kernelpkg/boot/initrd.img-${KVER}" "$BOOT_MNT/initrd.img-${KVER}"
 DTB="${SCRIPT_DIR}/dtb/rk3566-panther-x2.dtb"
 [[ -f "$DTB" ]] || { echo "缺少 ${DTB} — 请确认仓库已提交 dtb/rk3566-panther-x2.dtb"; exit 1; }
 mkdir -p "$BOOT_MNT/dtb/rockchip"
