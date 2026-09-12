@@ -77,4 +77,4 @@ CONFIG_SUSPEND=n
 CONFIG_ARM_PSCI_CPUIDLE=n
 # 全内建: 不再产出 /lib/modules,板上安装更简单(fragment 里的 =m 会被强制转为 =y)
 # 如果想保留模块化(便于单独替换驱动),删掉下面这行
-CONFIG_MODULES=n
+#CONFIG_MODULES=n
