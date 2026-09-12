@@ -28,9 +28,9 @@ jobs:
           mv "linux-${KVER}" linux
           rm -rf arch
 
-      - name: Overlay panther-x2-kernel files into kernel tree
-        run: |
-          rsync -a arch/ linux/arch/
+     # - name: Overlay panther-x2-kernel files into kernel tree
+     #   run: |
+      #    rsync -a arch/ linux/arch/
 
       - name: Install dependencies
         run: |
