@@ -19,7 +19,7 @@ on:
       hostname:
         description: "主机名"
         required: false
-        default: "arch"
+        default: "archlinux"
 
       timezone:
         description: "时区"
