@@ -5,11 +5,11 @@ on:
   workflow_dispatch:
     inputs:
       kernel_deb_url:
-        description: "我们自建内核的 linux-image-*.deb 直链 (来自 163jm/kernel 的 Release)。这是唯一的内核来源。"
+        description: "linux-image-*.deb 直链"
         required: true
         default: ""
       rootfs_url:
-        description: "rootfs 底座镜像直链 (*.img.gz, 来自本仓库 debian.yml 等的 Release)"
+        description: "rootfs 底座镜像直链"
         required: true
         default: ""
       firmware_url:
@@ -39,7 +39,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Assemble image (armbian-free)
+      - name: Assemble image
         run: |
           sudo -E \
             KERNEL_DEB_URL="${{ inputs.kernel_deb_url }}" \
