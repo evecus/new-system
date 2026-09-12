@@ -22,7 +22,7 @@ jobs:
 
       - name: Download stable kernel source
         run: |
-          KVER=7.2.4
+          KVER=7.2.5
           wget -q "https://cdn.kernel.org/pub/linux/kernel/v7.x/linux-${KVER}.tar.xz"
           tar -xf "linux-${KVER}.tar.xz"
           mv "linux-${KVER}" linux
