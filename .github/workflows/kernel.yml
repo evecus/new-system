@@ -22,8 +22,8 @@ jobs:
 
       - name: Download stable kernel source
         run: |
-          KVER=6.12.109   #7.2.5 6.12.109 6.18.51 6.6.156
-          wget -q "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-${KVER}.tar.xz"
+          KVER=7.2.5   #7.2.5 6.12.109 6.18.51 6.6.156
+          wget -q "https://cdn.kernel.org/pub/linux/kernel/v7.x/linux-${KVER}.tar.xz"
           tar -xf "linux-${KVER}.tar.xz"
           mv "linux-${KVER}" linux
 
@@ -112,6 +112,7 @@ jobs:
           PKG="panther-x2-kernel-${KVER}"
 
           # --- 原有 tar.gz ---
+          mkdir -p "${PKG}" 
           cp linux/arch/arm64/boot/Image "${PKG}/"
           cp boot-extra/initrd.img-${KVER} "${PKG}/" 2>/dev/null || true
           cp boot-extra/uInitrd-${KVER} "${PKG}/" 2>/dev/null || true
