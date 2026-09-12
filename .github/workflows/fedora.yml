@@ -289,6 +289,7 @@ jobs:
         with:
           tag: rootfs
           name: "rootfs"
+          prerelease: true
           artifacts: |
             ${{ steps.wrap_image.outputs.OUT_DIR }}/${{ steps.wrap_image.outputs.IMG_XZ_NAME }}
           allowUpdates: true
