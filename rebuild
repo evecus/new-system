@@ -59,8 +59,14 @@ VMLINUZ="kernelpkg/boot/Image"
 echo "KVER = ${KVER}"
 
 step "3/7 下载并提取 rootfs 底座"
-wget -q --show-progress -O rootfs.img.gz "$ROOTFS_URL"
-gunzip -f rootfs.img.gz
+# 依据 URL 后缀自动识别压缩格式 (.img.xz 或 .img.gz)，两者都支持
+if [[ "$ROOTFS_URL" == *.xz ]]; then
+    wget -q --show-progress -O rootfs.img.xz "$ROOTFS_URL"
+    xz -d -f -T0 rootfs.img.xz
+else
+    wget -q --show-progress -O rootfs.img.gz "$ROOTFS_URL"
+    gunzip -f rootfs.img.gz
+fi
 SRC_LOOP="$(losetup -P -f --show rootfs.img)"
 SRC_MNT="$WORK/src_root"
 mkdir -p "$SRC_MNT"
