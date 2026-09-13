@@ -34,7 +34,9 @@ apt-get install -y -qq dosfstools e2fsprogs parted wget gzip kmod xz-utils cpio 
 
 step "2/7 下载并解包内核 deb"
 cd "$WORK"
-wget -q --show-progress -O kernel.deb "$KERNEL_DEB_URL"
+echo "下载内核 deb: ${KERNEL_DEB_URL}"
+wget -q -O kernel.deb "$KERNEL_DEB_URL"
+echo "下载完成: $(du -h kernel.deb | awk '{print $1}')"
 rm -rf kernelpkg && mkdir kernelpkg
 dpkg-deb -x kernel.deb kernelpkg
 # KVER 从 deb control 的 Version 字段读取 (新 deb 不带 lib/modules, 无法从目录名取)
@@ -46,10 +48,14 @@ echo "KVER = ${KVER}"
 step "3/7 下载并提取 rootfs 底座"
 # 依据 URL 后缀自动识别压缩格式 (.img.xz 或 .img.gz)，两者都支持
 if [[ "$ROOTFS_URL" == *.xz ]]; then
-    wget -q --show-progress -O rootfs.img.xz "$ROOTFS_URL"
+    echo "下载 rootfs (.xz): ${ROOTFS_URL}"
+    wget -q -O rootfs.img.xz "$ROOTFS_URL"
+    echo "下载完成: $(du -h rootfs.img.xz | awk '{print $1}')"
     xz -d -f -T0 rootfs.img.xz
 else
-    wget -q --show-progress -O rootfs.img.gz "$ROOTFS_URL"
+    echo "下载 rootfs (.gz): ${ROOTFS_URL}"
+    wget -q -O rootfs.img.gz "$ROOTFS_URL"
+    echo "下载完成: $(du -h rootfs.img.gz | awk '{print $1}')"
     gunzip -f rootfs.img.gz
 fi
 SRC_LOOP="$(losetup -P -f --show rootfs.img)"
