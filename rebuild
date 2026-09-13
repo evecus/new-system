@@ -134,70 +134,7 @@ if [[ "$USED_MB" -gt $((ROOT_MB - 200)) ]]; then
     echo "!! 请把 root_mb 调大 (建议 $((USED_MB + 800)) 以上), 本次继续但可能失败"
 fi
 
-# --- 生成 uInitrd (本板 u-boot 的 boot.scr 无条件加载 uInitrd, 必须提供) ---
-# 方法: Debian busybox-static arm64 + 迷你 init 脚本 → cpio/gzip → mkimage
-# 等价于 ophub 在 arm64 系统里 update-initramfs + 99-uboot 钩子的产物, 但不依赖 arm64 系统
-step "4b/7 生成 uInitrd (deb 未自带时才生成)"
-if [[ -f "kernelpkg/boot/uInitrd" ]]; then
-    echo "内核 deb 已自带 uInitrd, 跳过 4b 生成"
-else
-mkdir -p "$WORK/initrd/bin" "$WORK/initrd/proc" "$WORK/initrd/sys" "$WORK/initrd/dev" "$WORK/initrd/run" "$WORK/initrd/mnt"
-POOL="http://deb.debian.org/debian/pool/main/b/busybox"
-BB_DEB="$(wget -qO- "$POOL/" | grep -oE 'busybox-static_[0-9][^"<]*_arm64\.deb' | sort -V | tail -1)"
-[[ -n "$BB_DEB" ]] || { echo "无法定位 busybox-static arm64 包"; exit 1; }
-echo "busybox 包: $BB_DEB"
-wget -q -O busybox.deb "$POOL/$BB_DEB"
-dpkg-deb -x busybox.deb "$WORK/initrd"
-# Debian 13(usr-merge) 装在 /usr/bin/busybox, 老版本在 /bin/busybox — 统一归位到 /bin/busybox
-BB_BIN="$(find "$WORK/initrd" -type f -name busybox | head -1)"
-[[ -n "$BB_BIN" ]] || { echo "busybox 解包失败(deb 里找不到 busybox 可执行文件)"; exit 1; }
-mkdir -p "$WORK/initrd/bin"
-[[ "$BB_BIN" = "$WORK/initrd/bin/busybox" ]] || cp "$BB_BIN" "$WORK/initrd/bin/busybox"
-
-cat > "$WORK/initrd/init" << 'INIT_EOF'
-#!/bin/busybox sh
-BB=/bin/busybox
-$BB --install -s /bin 2>/dev/null
-mkdir -p /proc /sys /dev /run /mnt
-mount -t proc none /proc
-mount -t sysfs none /sys
-mount -t devtmpfs none /dev 2>/dev/null
-
-ROOT_UUID=""
-for p in $(cat /proc/cmdline); do
-    case "$p" in root=UUID=*) ROOT_UUID="${p#root=UUID=}" ;; esac
-done
-echo "initramfs: waiting for root=UUID=$ROOT_UUID ..."
-
-DEV=""
-i=0
-while [ $i -lt 45 ]; do
-    DEV="$($BB blkid 2>/dev/null | grep "UUID=\"$ROOT_UUID\"" | cut -d: -f1 | head -1)"
-    [ -n "$DEV" ] && break
-    sleep 1; i=$((i+1))
-done
-
-if [ -z "$DEV" ]; then
-    echo "initramfs: 未找到根设备, 进入救援 shell"
-    exec $BB sh
-fi
-echo "initramfs: mounting $DEV"
-if ! mount -o ro "$DEV" /mnt 2>/dev/null; then
-    echo "initramfs: mount 失败, 进入救援 shell"
-    exec $BB sh
-fi
-echo "initramfs: switch_root"
-exec /bin/busybox switch_root /mnt /sbin/init
-echo "initramfs: switch_root 失败, 进入救援 shell"
-exec $BB sh
-INIT_EOF
-chmod 755 "$WORK/initrd/init"
-
-( cd "$WORK/initrd" && find . | cpio -o -H newc --quiet | gzip -9 ) > "$WORK/initrd.img.gz"
-mkimage -A arm64 -O linux -T ramdisk -C gzip -n uInitrd -d "$WORK/initrd.img.gz" "$WORK/uInitrd" > /dev/null
-[[ -f "$WORK/uInitrd" ]] || { echo "uInitrd 生成失败"; exit 1; }
-echo "uInitrd 生成成功: $(ls -l "$WORK/uInitrd" | awk '{print $5}') bytes"
-fi
+# uInitrd 由内核 deb 必带 (boot/uInitrd), 不做现场生成
 
 step "5/7 创建目标镜像 (GPT: ${SKIP_MB}M 间隙 + ${BOOT_MB}M boot + ${ROOT_MB}M root)"
 IMG="panther-x2-${OS_ID}-${OS_CODENAME}-${KVER}.img"
@@ -217,7 +154,7 @@ mount "${LOOP}p1" "$BOOT_MNT"
 mount "${LOOP}p2" "$ROOT_MNT"
 
 # bootfs: 本板 u-boot 只认 Armbian 流程(boot.scr + bootEnv.txt), 不扫 extlinux
-# boot.cmd 使用 ophub 原版流程: load uInitrd -> booti kernel ramdisk fdt (uInitrd 已在 4b 步生成)
+# boot.cmd 使用 ophub 原版流程: load uInitrd -> booti kernel ramdisk fdt
 BOOT_UUID="$(lsblk -no UUID "${LOOP}p1" | head -1)"
 ROOT_UUID="$(lsblk -no UUID "${LOOP}p2" | head -1)"
 cp "$VMLINUZ" "$BOOT_MNT/Image"
@@ -226,13 +163,8 @@ DTB="${SCRIPT_DIR}/dtb/rk3566-panther-x2.dtb"
 [[ -f "$DTB" ]] || { echo "缺少 ${DTB} — 请确认仓库已提交 dtb/rk3566-panther-x2.dtb"; exit 1; }
 mkdir -p "$BOOT_MNT/dtb/rockchip"
 cp "$DTB" "$BOOT_MNT/dtb/rockchip/"
-if [[ -f "kernelpkg/boot/uInitrd" ]]; then
-    cp "kernelpkg/boot/uInitrd" "$BOOT_MNT/uInitrd"
-    echo "使用内核 deb 自带的 uInitrd"
-else
-    cp "$WORK/uInitrd" "$BOOT_MNT/uInitrd"
-    echo "使用 rebuild 现场生成的 uInitrd"
-fi
+[[ -f "kernelpkg/boot/uInitrd" ]] || { echo "deb 中未找到 boot/uInitrd"; exit 1; }
+cp "kernelpkg/boot/uInitrd" "$BOOT_MNT/uInitrd"
 
 cat > "$BOOT_MNT/bootEnv.txt" << EOF
 verbosity=1
