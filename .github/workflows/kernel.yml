@@ -126,7 +126,6 @@ jobs:
                    "${DEB}/usr/share/doc/${DEB}"
           cp linux/arch/arm64/boot/Image       "${DEB}/boot/Image"
           cp linux/.config                     "${DEB}/boot/kernel-config"
-          cp boot-extra/initrd.img-${KVER} "${DEB}/boot/initrd.img"
           cp boot-extra/uInitrd-${KVER}    "${DEB}/boot/uInitrd"
           cat > "${DEB}/DEBIAN/control" << EOF
           Package: linux-image-panther-x2
