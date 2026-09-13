@@ -3,7 +3,6 @@ set -euo pipefail
 
 KERNEL_DEB_URL="${KERNEL_DEB_URL:?需要 KERNEL_DEB_URL}"
 ROOTFS_URL="${ROOTFS_URL:?需要 ROOTFS_URL}"
-FIRMWARE_URL="${FIRMWARE_URL:-}"
 ROOT_MB="${ROOT_MB:-2560}"
 ROOT_PASS="${ROOT_PASS:-1234}"
 SSH_PUBKEY="${SSH_PUBKEY:-}"
@@ -123,28 +122,9 @@ if [[ -d "$OVERLAY" ]]; then
     echo "已安装 panther 运行时机制 (resize/irq/cpufreq/swapfile/install-to-emmc)"
 fi
 
-# 内核模块 + depmod (depmod 跨架构可用, 只解析 .ko 元数据)
-mkdir -p "$RS/lib/modules"
-rm -rf "$RS/lib/modules/${KVER}"
-cp -a kernelpkg/lib/modules/${KVER} "$RS/lib/modules/"
-rm -f "$RS/lib/modules/${KVER}/build" "$RS/lib/modules/${KVER}/source"
-depmod -a -b "$RS" "${KVER}" 2>/dev/null || depmod -a "${KVER}" 2>/dev/null || true
+# 内核全内置 (无 modules), 不安装任何内核模块
 
-# WiFi/BT 固件: 优先仓库本地 firmware/brcm/, 其次 FIRMWARE_URL
-mkdir -p "$RS/lib/firmware/brcm"
-if [[ -d "${SCRIPT_DIR}/firmware/brcm" ]]; then
-    cp -a "${SCRIPT_DIR}/firmware/brcm/." "$RS/lib/firmware/brcm/"
-    echo "已从仓库 firmware/brcm 安装固件"
-elif [[ -n "$FIRMWARE_URL" ]]; then
-    wget -q --show-progress -O firmware.tar.gz "$FIRMWARE_URL"
-    mkdir -p "$RS/lib/firmware"
-    tar -xzf firmware.tar.gz -C "$RS/lib/firmware/"
-    echo "已从 FIRMWARE_URL 安装固件"
-fi
-ls "$RS/lib/firmware/brcm/brcmfmac43430-sdio.bin" >/dev/null 2>&1 \
-    || echo "!! 警告: 无 brcmfmac43430 固件, WiFi 将不可用"
-ls "$RS/lib/firmware/brcm/brcmfmac43430-sdio.txt" >/dev/null 2>&1 \
-    || echo "!! 警告: 无 nvram(.txt), WiFi 即使有 bin 也大概率起不来"
+# WiFi/BT 固件已内置进内核 Image, 不再单独安装固件包
 
 # rootfs 体积守卫: 防止 ROOT_MB 给小了导致拷贝中途爆盘
 USED_MB=$(du -sm "$RS" | awk '{print $1}')
@@ -350,12 +330,8 @@ for f in Image boot.scr bootEnv.txt uInitrd dtb/rockchip/rk3566-panther-x2.dtb; 
 done
 debugfs -R "stat /sbin/init" "$WORK/p2.img" >/dev/null 2>&1 && r=1 || r=0
 chk "p2:/sbin/init (init 系统存在)" $r
-debugfs -R "ls /lib/modules" "$WORK/p2.img" 2>/dev/null | grep -q "$KVER" && r=1 || r=0
-chk "p2:/lib/modules/$KVER" $r
 debugfs -R "cat /etc/fstab" "$WORK/p2.img" 2>/dev/null | grep -q "$ROOT_UUID" && r=1 || r=0
 chk "p2:/etc/fstab 含 ROOT_UUID" $r
-debugfs -R "stat /lib/firmware/brcm/brcmfmac43430-sdio.bin" "$WORK/p2.img" >/dev/null 2>&1 && r=1 || r=0
-chk "p2:/lib/firmware/brcm (WiFi 固件)" $r
 echo "自检结果: PASS=$PASS FAIL=$FAIL"
 [[ $FAIL -eq 0 ]] || echo "!! 存在 FAIL 项, 镜像大概率无法启动 — 优先解决 FAIL 再烧写"
 rm -f "$WORK/p1.img" "$WORK/p2.img"
@@ -368,7 +344,6 @@ kernel      : ${KVER}
 os          : ${OS_ID} ${OS_CODENAME}
 rootfs_url  : ${ROOTFS_URL}
 kernel_deb  : ${KERNEL_DEB_URL}
-firmware    : ${FIRMWARE_URL:-none}
 build_date  : $(date -u '+%Y-%m-%d %H:%M UTC')
 EOF
 # 产物交还给调用用户(sudo 场景下避免 root 属主导致后续 mv 失败)
