@@ -37,7 +37,8 @@ cd "$WORK"
 wget -q --show-progress -O kernel.deb "$KERNEL_DEB_URL"
 rm -rf kernelpkg && mkdir kernelpkg
 dpkg-deb -x kernel.deb kernelpkg
-KVER="$(ls kernelpkg/lib/modules/ | head -1)"
+# KVER 从 deb control 的 Version 字段读取 (新 deb 不带 lib/modules, 无法从目录名取)
+KVER="$(dpkg-deb -f kernel.deb Version)"
 VMLINUZ="kernelpkg/boot/Image"
 [[ -f "$VMLINUZ" ]] || { echo "deb 中未找到 Image"; exit 1; }
 echo "KVER = ${KVER}"
