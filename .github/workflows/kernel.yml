@@ -122,8 +122,7 @@ jobs:
           # --- deb 包 (linux-image 布局, dpkg -i 直接安装) ---
           DEB="linux-image-panther-x2"
           mkdir -p "${DEB}/DEBIAN" \
-                   "${DEB}/boot" \
-                   "${DEB}/usr/share/doc/${DEB}"
+                   "${DEB}/boot"
           cp linux/arch/arm64/boot/Image       "${DEB}/boot/Image"
           cp linux/.config                     "${DEB}/boot/kernel-config"
           cp boot-extra/uInitrd-${KVER}    "${DEB}/boot/uInitrd"
