@@ -12,6 +12,7 @@ CONFIG_DMA_SHARED_BUFFER=y
 # 明确关闭 NBD，避免因全内建被 olddefconfig 强制转成 =y
 CONFIG_BLK_DEV_NBD=n
 
+CONFIG_ARCH_ROCKCHIP=y
 # --- 板级硬件 ---
 # RK809 PMIC (供电树 + clkout1 提供 WiFi/BT 32.768K 时钟)
 CONFIG_MFD_RK8XX=y
